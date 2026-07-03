@@ -7,9 +7,9 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>ProxyBridge</AssemblyName>
     <RootNamespace>ProxyBridge.GUI</RootNamespace>
-    <Version>4.0.8-Beta</Version>
-    <AssemblyVersion>4.0.8</AssemblyVersion>
-    <FileVersion>4.0.8</FileVersion>
+    <Version>4.0.9-Beta</Version>
+    <AssemblyVersion>4.0.9</AssemblyVersion>
+    <FileVersion>4.0.9</FileVersion>
     <ApplicationIcon>Assets\logo.ico</ApplicationIcon>
     <Company>InterceptSuite</Company>
     <Product>ProxyBridge</Product>

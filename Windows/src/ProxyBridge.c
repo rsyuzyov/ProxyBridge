@@ -17,7 +17,7 @@
 #define LOCAL_PROXY_PORT 34010
 #define LOCAL_UDP_RELAY_PORT 34011  // its running UDP port still make sure to not run on same port as TCP, opening same port and tcp and udp cause issue and handling port at relay server response injection
 #define MAX_PROCESS_NAME 1024
-#define VERSION "4.0.8-Beta"
+#define VERSION "4.0.9-Beta"
 #define PID_CACHE_SIZE 1024
 #define PID_CACHE_TTL_MS 30000
 // Single packet-processor thread eliminates TCP packet reordering.
@@ -4891,14 +4891,19 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
     // re-injection loops that delay delivery by seconds and cause DTLS handshake
     // failures.  With "not impostor", injected packets bypass the driver entirely
     // and flow directly to the OS — zero extra hops, no loops.
+    // DHCP is deliberately excluded at the filter level so those packets never enter
+    // ProxyBridge at all. DHCP is link-local broadcast (0.0.0.0 -> 255.255.255.255) and
+    // #161  DHCPv4: client 68 / server 67     DHCPv6: client 546 / server 547
     snprintf(filter, sizeof(filter),
         "not impostor and ("
         "(tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
-        "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d))) or "
+        "(udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
+            "udp.SrcPort != 67 and udp.DstPort != 67 and udp.SrcPort != 68 and udp.DstPort != 68) or "
         "(udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and udp and not outbound and udp.SrcPort == 53) or "
         "(ipv6 and tcp and (outbound or loopback or (tcp.DstPort == %d or tcp.SrcPort == %d))) or "
-        "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d))))",
+        "(ipv6 and udp and (outbound or loopback or (udp.DstPort == %d or udp.SrcPort == %d)) and "
+            "udp.SrcPort != 546 and udp.DstPort != 546 and udp.SrcPort != 547 and udp.DstPort != 547))",
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT,
         g_local_relay_port, g_local_relay_port, LOCAL_UDP_RELAY_PORT, LOCAL_UDP_RELAY_PORT);
 
