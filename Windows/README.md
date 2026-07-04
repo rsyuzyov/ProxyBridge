@@ -417,7 +417,7 @@ The script automatically:
 - Locates your Visual Studio installation via `vswhere`
 - Compiles `ProxyBridgeCore.dll` (C, MSVC, WinDivert)
 - Compiles `ProxyBridge_CLI.exe` (C, MSVC, native)
-- Builds `ProxyBridge.exe` (C#, .NET 10, Avalonia GUI)
+- Builds `ProxyBridge.exe` (C GUI, MSVC, self-contained)
 - Copies all outputs to `Windows\output\`
 
 ### Manual Build - DLL (MSVC)

@@ -4843,6 +4843,147 @@ PROXYBRIDGE_API int ProxyBridge_TestProxyConfig(UINT32 config_id, const char* ta
     }
 }
 
+PROXYBRIDGE_API int ProxyBridge_TestProxyConfigEx(UINT32 config_id, const char* target_host, UINT16 target_port,
+                                                  ProxyTestLogCallback cb, void* user)
+{
+    #define TLOG(...) do { if (cb) { char _l[300]; _snprintf_s(_l, sizeof(_l), _TRUNCATE, __VA_ARGS__); cb(_l, user); } } while (0)
+
+    PROXY_CONFIG *cfg = find_proxy_config(config_id);
+    if (cfg == NULL) { TLOG("[FAIL] No proxy config found"); return -1; }
+    if (target_host == NULL || target_host[0] == '\0') target_host = "www.google.com";
+    if (target_port == 0) target_port = 80;
+
+    BOOL is_socks = (cfg->type == PROXY_TYPE_SOCKS5);
+    BOOL use_auth = (cfg->username[0] != '\0');
+
+    TLOG("Proxy:    %s:%u", cfg->host, cfg->port);
+    TLOG("Protocol: %s", is_socks ? "SOCKS5" : "HTTP");
+    TLOG("Auth:     %s", use_auth ? "yes" : "no");
+    TLOG("Target:   %s:%u", target_host, target_port);
+
+    UINT32 proxy_ip = resolve_hostname(cfg->host);
+    if (proxy_ip == 0) { TLOG(""); TLOG("[FAIL] Could not resolve proxy host '%s'", cfg->host); return -1; }
+    struct in_addr pa; pa.s_addr = proxy_ip;
+    TLOG("Proxy IP: %s", inet_ntoa(pa));
+
+    int overall = 0;
+
+    // ── Test 1: TCP connection to the proxy server ───────────────────────────
+    TLOG("");
+    TLOG("Test 1: Connection to the proxy server");
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) { TLOG("  [FAIL] Failed to create socket"); return -1; }
+    DWORD to = 10000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+    struct sockaddr_in paddr; memset(&paddr, 0, sizeof(paddr));
+    paddr.sin_family = AF_INET; paddr.sin_port = htons(cfg->port); paddr.sin_addr.s_addr = proxy_ip;
+    ULONGLONG c0 = GetTickCount64();
+    if (connect(s, (struct sockaddr*)&paddr, sizeof(paddr)) != 0)
+    {
+        TLOG("  [FAIL] Could not connect to the proxy server");
+        closesocket(s);
+        TLOG(""); TLOG("Testing finished: proxy is NOT reachable.");
+        return -1;
+    }
+    ULONGLONG c1 = GetTickCount64();
+    ULONGLONG connect_ms = c1 - c0;
+    TLOG("  Connection established (%llu ms)", connect_ms);
+    TLOG("  Test 1 passed");
+
+    // ── Test 2: Connection through the proxy server ──────────────────────────
+    TLOG("");
+    TLOG("Test 2: Connection through the proxy server");
+    UINT32 dest_ip = resolve_hostname(target_host);
+    if (dest_ip == 0)
+    {
+        TLOG("  [FAIL] Could not resolve target host '%s'", target_host);
+        closesocket(s);
+        overall = -1;
+    }
+    else
+    {
+        ULONGLONG h0 = GetTickCount64();
+        int rc = is_socks ? socks5_connect(s, dest_ip, target_port, cfg)
+                          : http_connect(s, dest_ip, target_port, cfg);
+        ULONGLONG h1 = GetTickCount64();
+        if (rc != 0)
+        {
+            TLOG("  [FAIL] Could not establish a tunnel through the proxy (code %d)", rc);
+            if (use_auth) TLOG("  Hint: verify the proxy credentials");
+            overall = -1;
+        }
+        else
+        {
+            if (use_auth) TLOG("  Authentication was successful");
+            TLOG("  Connection to %s:%u established through the proxy (%llu ms)", target_host, target_port, h1 - h0);
+
+            // Try to load a default web page (best-effort; needs a web server on the target).
+            char req[256];
+            int rn = _snprintf_s(req, sizeof(req), _TRUNCATE,
+                                 "GET / HTTP/1.0\r\nHost: %s\r\nUser-Agent: ProxyBridge-Check\r\nConnection: close\r\n\r\n",
+                                 target_host);
+            if (rn > 0 && send(s, req, rn, 0) == rn)
+            {
+                char resp[512]; int got = recv(s, resp, sizeof(resp) - 1, 0);
+                if (got > 0)
+                {
+                    resp[got] = '\0';
+                    if (strncmp(resp, "HTTP/", 5) == 0)
+                    {
+                        char status[64] = {0};
+                        const char* nl = strchr(resp, '\r'); size_t sl = nl ? (size_t)(nl - resp) : 0;
+                        if (sl > 0 && sl < sizeof(status)) { memcpy(status, resp, sl); status[sl] = 0; }
+                        TLOG("  Default web page loaded: %s", status[0] ? status : "HTTP response received");
+                    }
+                    else TLOG("  Received %d bytes (non-HTTP target)", got);
+                }
+                else TLOG("  Note: no page data returned (target may not run a web server)");
+            }
+            TLOG("  Test 2 passed");
+        }
+    }
+    closesocket(s);
+
+    // ── Test 3: Proxy server latency ─────────────────────────────────────────
+    TLOG("");
+    TLOG("Test 3: Proxy server latency");
+    TLOG("  Latency = %llu ms", connect_ms);
+    TLOG("  Test 3 passed");
+
+    // ── Test 4: SOCKS5 UDP ASSOCIATE support ─────────────────────────────────
+    if (is_socks)
+    {
+        TLOG("");
+        TLOG("Test 4: SOCKS5 UDP ASSOCIATE support");
+        SOCKET us = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (us != INVALID_SOCKET)
+        {
+            setsockopt(us, SOL_SOCKET, SO_RCVTIMEO, (const char*)&to, sizeof(to));
+            setsockopt(us, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+            if (connect(us, (struct sockaddr*)&paddr, sizeof(paddr)) == 0)
+            {
+                struct sockaddr_in relay; memset(&relay, 0, sizeof(relay));
+                int urc = socks5_udp_associate_with_config(us, &relay, cfg);
+                if (urc == 0)
+                {
+                    TLOG("  UDP ASSOCIATE granted; relay = %s:%u", inet_ntoa(relay.sin_addr), ntohs(relay.sin_port));
+                    TLOG("  UDP is supported by this proxy");
+                }
+                else TLOG("  UDP ASSOCIATE refused — this proxy does not support UDP");
+            }
+            else TLOG("  Could not open a control connection for the UDP test");
+            closesocket(us);
+        }
+    }
+
+    TLOG("");
+    TLOG(overall == 0 ? "Testing finished: proxy is ready to work." : "Testing finished with errors.");
+    return overall;
+
+    #undef TLOG
+}
+
 PROXYBRIDGE_API void ProxyBridge_SetLocalhostViaProxy(BOOL enable)
 {
     g_localhost_via_proxy = enable;

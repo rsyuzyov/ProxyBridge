@@ -1,0 +1,234 @@
+#include <windows.h>
+#include "resource.h"
+
+// Application icon (reuse the shared logo)
+IDI_APPICON ICON "logo.ico"
+
+// Embedded manifest (admin + Common Controls v6 + DPI)
+1 24 "app.manifest"
+
+// Version info (exe Properties → Details); numbers come from resource.h
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    PB_VER_MAJOR,PB_VER_MINOR,PB_VER_PATCH,PB_VER_BUILD
+ PRODUCTVERSION PB_VER_MAJOR,PB_VER_MINOR,PB_VER_PATCH,PB_VER_BUILD
+ FILEFLAGSMASK  0x3fL
+ FILEFLAGS      0x0L
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName",      "InterceptSuite"
+            VALUE "FileDescription",  "Universal proxy client for Windows applications"
+            VALUE "FileVersion",      PB_VER_STR
+            VALUE "InternalName",     "ProxyBridge"
+            VALUE "OriginalFilename", "ProxyBridge.exe"
+            VALUE "ProductName",      "ProxyBridge"
+            VALUE "ProductVersion",   PB_VER_STR
+            VALUE "LegalCopyright",   "Copyright (c) 2026 InterceptSuite"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+// Note: the menu is built programmatically in main.c (from loc.h) so it can be localized
+// at runtime - there is no menu resource here on purpose.
+
+// Proxy Servers (list) dialog
+IDD_SERVERS DIALOGEX 0, 0, 340, 176
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Proxy Servers"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    CONTROL         "", IDC_SV_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
+                    8, 8, 258, 138
+    PUSHBUTTON      "Add...",     IDC_SV_ADD,    274,   8, 58, 15
+    PUSHBUTTON      "Edit...",    IDC_SV_EDIT,   274,  28, 58, 15
+    PUSHBUTTON      "Remove",     IDC_SV_REMOVE, 274,  48, 58, 15
+    PUSHBUTTON      "Proxy Test", IDC_SV_CHECK,  274,  72, 58, 15
+    DEFPUSHBUTTON   "Close",      IDCANCEL,      274, 155, 58, 15
+END
+
+// Proxy Server (edit) sub-dialog
+IDD_SERVER DIALOGEX 0, 0, 244, 176
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Proxy Server"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    GROUPBOX        "Server",        IDC_SE_G_SERVER,  8,   6, 228, 66
+    LTEXT           "Address:",      IDC_SE_L_ADDR,   18,  24, 44, 10
+    EDITTEXT        IDC_SE_ADDR,     66,  22, 108, 12, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Port:",         IDC_SE_L_PORT,  182,  24, 20, 10
+    EDITTEXT        IDC_SE_PORT,    204,  22,  24, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP
+    LTEXT           "Protocol:",     IDC_SE_L_PROTO,  18,  48, 44, 10
+    COMBOBOX        IDC_SE_PROTO,    66,  46, 108, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    GROUPBOX        "Authentication", IDC_SE_G_AUTH,  8,  80, 228, 66
+    AUTOCHECKBOX    "Enable",        IDC_SE_AUTH,     18,  96, 60, 10
+    LTEXT           "Username:",     IDC_SE_L_USER,   18, 114, 44, 10
+    EDITTEXT        IDC_SE_USER,     66, 112, 162, 12, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Password:",     IDC_SE_L_PASS,   18, 130, 44, 10
+    EDITTEXT        IDC_SE_PASS,     66, 128, 162, 12, ES_AUTOHSCROLL | ES_PASSWORD | WS_TABSTOP
+    DEFPUSHBUTTON   "OK",            IDOK,           128, 156, 50, 14
+    PUSHBUTTON      "Cancel",        IDCANCEL,       186, 156, 50, 14
+END
+
+// Proxy Checker dialog
+IDD_CHECKER DIALOGEX 0, 0, 360, 236
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Proxy Checker"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "Host:",    IDC_CK_L_HOST,   8,  10, 20, 10
+    EDITTEXT        IDC_CK_HOST, 30,  8, 118, 12, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Port:",    IDC_CK_L_PORT, 154,  10, 18, 10
+    EDITTEXT        IDC_CK_PORT, 174,  8,  32, 12, ES_AUTOHSCROLL | ES_NUMBER | WS_TABSTOP
+    PUSHBUTTON      "Retest",   IDC_CK_RETEST, 240,   7, 52, 14
+    DEFPUSHBUTTON   "Close",    IDCANCEL,      300,   7, 52, 14
+    EDITTEXT        IDC_CK_LOG,  8,  28, 344, 200,
+                    ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER | NOT WS_TABSTOP
+END
+
+// Proxification Rules (list) dialog
+IDD_RULES DIALOGEX 0, 0, 540, 300
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Proxy Rules"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    PUSHBUTTON      "Add...",    IDC_RL_ADD,     8,   8, 60, 16
+    PUSHBUTTON      "Clone",     IDC_RL_CLONE,  72,   8, 60, 16
+    PUSHBUTTON      "Edit...",   IDC_RL_EDIT,  136,   8, 60, 16
+    PUSHBUTTON      "Remove",    IDC_RL_REMOVE,200,   8, 60, 16
+    CONTROL         "", IDC_RL_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
+                    8, 30, 500, 232
+    PUSHBUTTON      "Move Up",   IDC_RL_UP,   516,  30, 18, 16
+    PUSHBUTTON      "Move Down", IDC_RL_DOWN, 516,  52, 18, 16
+    LTEXT           "Rules are checked top to bottom; use the check box to enable/disable a rule.",
+                    IDC_RL_HINT,  8, 270, 400, 11
+    DEFPUSHBUTTON   "Close",     IDCANCEL,    456, 278, 60, 16
+END
+
+// Proxification Rule (edit) sub-dialog
+IDD_RULE DIALOGEX 0, 0, 400, 272
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Proxy Rule"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    AUTOCHECKBOX    "Enabled",         IDC_RE_ENABLED,  330,  10, 62, 10
+    LTEXT           "Applications:",   IDC_RE_L_APPS,     8,  10, 80, 10
+    EDITTEXT        IDC_RE_APPS,       92,   8, 176, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Browse...",       IDC_RE_BROWSE,   272,   7, 50, 14
+    LTEXT           "",                IDC_RE_EX_APPS,   92,  24, 300, 9
+
+    LTEXT           "Target Hosts:",   IDC_RE_L_HOSTS,    8,  40, 80, 10
+    EDITTEXT        IDC_RE_HOSTS,      92,  38, 300, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_EX_HOSTS,  92,  54, 300, 9
+
+    LTEXT           "Target Ports:",   IDC_RE_L_PORTS,    8,  70, 80, 10
+    EDITTEXT        IDC_RE_PORTS,      92,  68, 300, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_EX_PORTS,  92,  84, 300, 9
+
+    LTEXT           "Target Domains:", IDC_RE_L_DOMAINS,  8, 100, 80, 10
+    EDITTEXT        IDC_RE_DOMAINS,    92,  98, 300, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_EX_DOMAINS,92, 114, 300, 9
+
+    LTEXT           "Protocol:",       IDC_RE_L_PROTO,    8, 130, 80, 10
+    COMBOBOX        IDC_RE_PROTO,      92, 128, 110, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "",                IDC_RE_UDPNOTE,   92, 146, 300, 40
+
+    LTEXT           "Action:",         IDC_RE_L_ACTION,   8, 192, 80, 10
+    COMBOBOX        IDC_RE_ACTION,     92, 190, 300,160, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    DEFPUSHBUTTON   "OK",              IDOK,            282, 250, 52, 14
+    PUSHBUTTON      "Cancel",          IDCANCEL,        338, 250, 52, 14
+END
+
+// Log Filters (list) dialog
+IDD_FILTERS DIALOGEX 0, 0, 460, 260
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Log Filters"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "", IDC_FL_DESC, 8, 6, 444, 40
+    PUSHBUTTON      "Add...",   IDC_FL_ADD,     8,  50, 60, 16
+    PUSHBUTTON      "Edit...",  IDC_FL_EDIT,   72,  50, 60, 16
+    PUSHBUTTON      "Remove",   IDC_FL_REMOVE, 136,  50, 60, 16
+    CONTROL         "", IDC_FL_LIST, "SysListView32",
+                    LVS_REPORT | LVS_SHOWSELALWAYS | LVS_SINGLESEL | WS_BORDER | WS_TABSTOP,
+                    8, 72, 444, 158
+    DEFPUSHBUTTON   "Close",    IDCANCEL,      392, 238, 60, 16
+END
+
+// Log Filter (edit) sub-dialog
+IDD_FILTER DIALOGEX 0, 0, 280, 178
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Log Filter Rule"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "Mode:",     IDC_FE_L_MODE,    8,  12, 60, 10
+    COMBOBOX        IDC_FE_MODE,  80,  10, 120, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Process:",  IDC_FE_L_PROC,    8,  34, 60, 10
+    EDITTEXT        IDC_FE_PROC,  80,  32, 190, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "IP:",       IDC_FE_L_IP,      8,  56, 60, 10
+    EDITTEXT        IDC_FE_IP,    80,  54, 190, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Port:",     IDC_FE_L_PORT,    8,  78, 60, 10
+    EDITTEXT        IDC_FE_PORT,  80,  76, 190, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Protocol:", IDC_FE_L_PROTO,   8, 100, 60, 10
+    COMBOBOX        IDC_FE_PROTO, 80,  98, 120, 80, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Action:",   IDC_FE_L_ACTION,  8, 122, 60, 10
+    COMBOBOX        IDC_FE_ACTION,80, 120, 120, 90, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "OK",        IDOK,           164, 152, 52, 14
+    PUSHBUTTON      "Cancel",    IDCANCEL,       220, 152, 52, 14
+END
+
+// Update notification dialog
+IDD_UPDATE DIALOGEX 0, 0, 300, 176
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Software Update"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    CTEXT           "",  IDC_UP_TEXT,     10,  12, 280, 22
+    CTEXT           "",  IDC_UP_VERS,     10,  42, 280, 12
+    CTEXT           "",  IDC_UP_DATE,     10,  58, 280, 11
+    CONTROL         "", IDC_UP_NOTES, "SysLink", WS_TABSTOP, 10, 76, 280, 12
+    CONTROL         "", IDC_UP_PROGRESS, "msctls_progress32", WS_BORDER, 10, 98, 280, 10
+    CTEXT           "",  IDC_UP_STATUS,   10, 112, 280, 11
+    PUSHBUTTON      "Update Now",      IDC_UP_NOW,     14, 150, 84, 18
+    PUSHBUTTON      "Later",           IDCANCEL,      108, 150, 60, 18
+    PUSHBUTTON      "Don't Ask Again", IDC_UP_DONTASK,178, 150, 108, 18
+END
+
+// Name input dialog (new profile)
+IDD_NAME DIALOGEX 0, 0, 220, 80
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "New Profile"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    LTEXT           "Profile name:", IDC_NAME_PROMPT, 10, 12, 200, 10
+    EDITTEXT        IDC_NAME_EDIT,   10, 28, 200, 13, ES_AUTOHSCROLL | WS_TABSTOP
+    DEFPUSHBUTTON   "OK",            IDOK,      100, 54, 50, 14
+    PUSHBUTTON      "Cancel",        IDCANCEL,  158, 54, 50, 14
+END
+
+// About dialog
+IDD_ABOUT DIALOGEX 0, 0, 250, 170
+STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "About ProxyBridge"
+FONT 11, "Segoe UI", 400, 0, 0x0
+BEGIN
+    CTEXT           "ProxyBridge",  IDC_AB_TITLE,    0,  12, 250, 18
+    CTEXT           "",             IDC_AB_VER,      0,  33, 250, 11
+    CTEXT           "",             IDC_AB_DESC,     6,  50, 238, 11
+    CTEXT           "",             IDC_AB_AUTHOR,   0,  67, 250, 11
+    CONTROL         "", IDC_AB_WEB,    "SysLink", WS_TABSTOP, 0, 86, 250, 12
+    CONTROL         "", IDC_AB_GITHUB, "SysLink", WS_TABSTOP, 0, 103, 250, 12
+    CTEXT           "",             IDC_AB_LICENSE,  0, 122, 250, 11
+    DEFPUSHBUTTON   "Close",        IDCANCEL,       99, 146, 52, 16
+END

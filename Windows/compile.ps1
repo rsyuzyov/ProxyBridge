@@ -196,38 +196,43 @@ if ($success) {
         }
     }
 
-    Write-Host "`nPublishing GUI..." -ForegroundColor Green
-    $publishResult = dotnet publish gui/ProxyBridge.GUI.csproj -c Release -r win-x64 --self-contained `
-        /p:PublishTrimmed=true `
-        /p:PublishSingleFile=false `
-        /p:EnableCompressionInSingleFile=true `
-        /p:DebugType=None `
-        /p:DebugSymbols=false `
-        /p:Optimize=true `
-        /p:TieredCompilation=true `
-        /p:TieredCompilationQuickJit=false `
-        /p:ReadyToRun=true `
-        -o gui/bin/Release/net10.0-windows/win-x64/publish 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "  GUI published successfully" -ForegroundColor Gray
+    # ── C GUI (MSVC) ─────────────────────────────────────────────────────────
+    # Single self-contained ProxyBridge.exe (~0.5 MB, static CRT) that loads
+    # ProxyBridgeCore.dll from its own folder. No extra runtime or DLLs.
+    Write-Host "`nBuilding C GUI (MSVC)..." -ForegroundColor Green
+    if ($script:foundVcvarsPath -and (Test-Path $script:foundVcvarsPath)) {
+        # Production build. Compiler: size-optimized static-CRT release with the security
+        # hardening set — /GS (stack cookies), /guard:cf (Control Flow Guard), /sdl (extra
+        # security diagnostics), /GL + /Gy for whole-program opt & COMDAT folding.
+        # Linker: /DYNAMICBASE + /HIGHENTROPYVA (64-bit ASLR), /NXCOMPAT (DEP),
+        # /guard:cf (CFG), /CETCOMPAT (shadow-stack), /LTCG, dead-code strip.
+        $guiClArgs = "/nologo /utf-8 /O1 /Os /MT /GL /Gy /GS /guard:cf /sdl /W4 " +
+                     "/DNDEBUG /D_CRT_SECURE_NO_WARNINGS /DUNICODE /D_UNICODE " +
+                     "main.c profile\profile.c app.res " +
+                     "/Fe:ProxyBridge.exe " +
+                     "/link /LTCG /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF /RELEASE " +
+                     "/DYNAMICBASE /HIGHENTROPYVA /NXCOMPAT /guard:cf /CETCOMPAT " +
+                     "user32.lib gdi32.lib comctl32.lib shell32.lib comdlg32.lib winhttp.lib"
 
-        Write-Host "`nCopying GUI files to output..." -ForegroundColor Green
-        $guiPublishPath = "gui\bin\Release\net10.0-windows\win-x64\publish"
+        # Sources live in subfolders. rc runs from res\ so app.rc's relative paths
+        # (resource.h, app.manifest, logo.ico) resolve; it writes app.res back to gui\.
+        Push-Location "gui"
+        $guiCmd = "`"$script:foundVcvarsPath`" $script:foundArch >nul && " +
+                  "pushd res && rc /nologo /fo ..\app.res app.rc && popd && cl.exe $guiClArgs"
+        $guiOut  = cmd /c $guiCmd '2>&1'
+        $guiExit = $LASTEXITCODE
+        Pop-Location
 
-        Copy-Item "$guiPublishPath\ProxyBridge.exe" -Destination $OutputDir -Force
-        Write-Host "  Copied: ProxyBridge.exe" -ForegroundColor Gray
-
-        Get-ChildItem "$guiPublishPath\*.dll" | ForEach-Object {
-            Copy-Item $_.FullName -Destination $OutputDir -Force
-            Write-Host "  Copied: $($_.Name)" -ForegroundColor Gray
+        if ($guiExit -eq 0 -and (Test-Path "gui\ProxyBridge.exe")) {
+            Move-Item "gui\ProxyBridge.exe" -Destination $OutputDir -Force
+            Write-Host "  C GUI built: ProxyBridge.exe" -ForegroundColor Gray
+            Remove-Item "gui\*.obj","gui\app.res" -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-Host "  C GUI build failed!" -ForegroundColor Red
+            Write-Host $guiOut
         }
-
-        Write-Host "`nCleaning up GUI build artifacts..." -ForegroundColor Yellow
-        Remove-Item "gui\bin" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item "gui\obj" -Recurse -Force -ErrorAction SilentlyContinue
     } else {
-        Write-Host "  GUI publish failed!" -ForegroundColor Red
-        Write-Host $publishResult
+        Write-Host "  Skipped: MSVC not found" -ForegroundColor Yellow
     }
 
     # ── Build CLI ────────────────────────────────────────────────────────────
