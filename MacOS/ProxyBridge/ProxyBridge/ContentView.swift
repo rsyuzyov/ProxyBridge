@@ -163,10 +163,9 @@ struct ConnectionsView: View {
     }
     
     private func scrollToLast(proxy: ScrollViewProxy) {
+        // no animation, this fires on every poll and animating a long list burns cpu
         if let last = connections.last {
-            withAnimation {
-                proxy.scrollTo(last.id, anchor: .bottom)
-            }
+            proxy.scrollTo(last.id, anchor: .bottom)
         }
     }
 }
@@ -230,10 +229,9 @@ struct ActivityLogsView: View {
     }
     
     private func scrollToLast(proxy: ScrollViewProxy) {
+        // no animation, this fires on every poll and animating a long list burns cpu
         if let last = logs.last {
-            withAnimation {
-                proxy.scrollTo(last.id, anchor: .bottom)
-            }
+            proxy.scrollTo(last.id, anchor: .bottom)
         }
     }
 }

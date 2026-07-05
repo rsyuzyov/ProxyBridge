@@ -146,7 +146,7 @@ struct ProxyRule: Codable {
             return true
         }
         
-        // Check for IP range (e.g., 192.168.1.1-192.168.1.254)
+        // ip range, e.g. 192.168.1.1-192.168.1.254
         if pattern.contains("-") {
             let parts = pattern.components(separatedBy: "-")
             if parts.count == 2 {
@@ -162,7 +162,7 @@ struct ProxyRule: Codable {
             return false
         }
         
-        // Wildcard matching (e.g., 192.168.1.*)
+        // wildcard, e.g. 192.168.1.*
         let patternOctets = pattern.components(separatedBy: ".")
         let ipOctets = ipString.components(separatedBy: ".")
         
@@ -220,16 +220,33 @@ struct ProxyRule: Codable {
 
 class AppProxyProvider: NETransparentProxyProvider {
     
+    // one log entry, kept as an enum so we don't allocate a dictionary per line,
+    // the dict is only built when the gui drains a batch
+    private enum LogEntry {
+        case connection(proto: String, process: String, destination: String, port: String, proxy: String)
+        case activity(timestamp: String, level: String, message: String)
+
+        func toDict() -> [String: String] {
+            switch self {
+            case let .connection(proto, process, destination, port, proxy):
+                return ["type": "connection", "protocol": proto, "process": process,
+                        "destination": destination, "port": port, "proxy": proxy]
+            case let .activity(timestamp, level, message):
+                return ["type": "activity", "timestamp": timestamp, "level": level, "message": message]
+            }
+        }
+    }
+
     // circular buffer for logs, avoids shifting the whole array on every pop
     private static let logCapacity = 1000
-    private var logBuffer: [[String: String]] = Array(repeating: [:], count: AppProxyProvider.logCapacity)
-    private var logHead = 0  // next read position
-    private var logTail = 0  // next write position
+    private var logBuffer = [LogEntry?](repeating: nil, count: AppProxyProvider.logCapacity)
+    private var logHead = 0
+    private var logTail = 0
     private var logCount = 0
     private let logQueueLock = NSLock()
     private let dateFormatter: ISO8601DateFormatter = ISO8601DateFormatter()
     
-    // cache results so each process only instead of per-connection.
+    // cache by pid so we don't call proc_pidpath on every connection
     private var pidCache: [pid_t: String] = [:]
     private let pidCacheLock = NSLock()
     private static let pidCacheMaxSize = 256
@@ -250,15 +267,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         guard pid > 0 else { return nil }
         
-        // Check cache first
         pidCacheLock.lock()
         if let cached = pidCache[pid] {
             pidCacheLock.unlock()
             return cached
         }
         pidCacheLock.unlock()
-        
-        // Cache miss - call proc_pidpath()
+
         var pathBuffer = [Int8](repeating: 0, count: Int(MAXPATHLEN))
         guard proc_pidpath(pid, &pathBuffer, UInt32(MAXPATHLEN)) > 0 else {
             return nil
@@ -278,10 +293,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         return processName
     }
     
-    private var _trafficLoggingEnabled: Int32 = 1  // atomic: 1=enabled, 0=disabled
+    // guarded by its own lock, the old OSAtomic compare-and-swap setter could
+    // silently no-op if the stored value wasn't the exact expected one
+    private var _trafficLoggingEnabled = true
+    private let trafficLoggingLock = NSLock()
     private var trafficLoggingEnabled: Bool {
-        get { return OSAtomicAdd32(0, &_trafficLoggingEnabled) != 0 }
-        set { OSAtomicCompareAndSwap32(newValue ? 0 : 1, newValue ? 1 : 0, &_trafficLoggingEnabled) }
+        get { trafficLoggingLock.lock(); defer { trafficLoggingLock.unlock() }; return _trafficLoggingEnabled }
+        set { trafficLoggingLock.lock(); _trafficLoggingEnabled = newValue; trafficLoggingLock.unlock() }
     }
     
     private var rules: [ProxyRule] = []
@@ -299,13 +317,12 @@ class AppProxyProvider: NETransparentProxyProvider {
     private let proxyLock = NSLock()
     
     private func log(_ message: String, level: String = "INFO") {
-        let logEntry: [String: String] = [
-            "timestamp": dateFormatter.string(from: Date()),
-            "level": level,
-            "message": message
-        ]
+        appendLog(.activity(timestamp: dateFormatter.string(from: Date()), level: level, message: message))
+    }
+
+    private func appendLog(_ entry: LogEntry) {
         logQueueLock.lock()
-        logBuffer[logTail] = logEntry
+        logBuffer[logTail] = entry
         logTail = (logTail + 1) % AppProxyProvider.logCapacity
         if logCount < AppProxyProvider.logCapacity {
             logCount += 1
@@ -336,11 +353,36 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     override func stopProxy(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {
+        udpLock.lock()
+        let all = Array(udpAssociations.values)
+        udpAssociations.removeAll()
+        udpLock.unlock()
+        for a in all {
+            a.controlConnection.cancel()
+            a.udpSession.cancel()
+        }
         completionHandler()
     }
     
-    private var udpTCPConnections: [NEAppProxyUDPFlow: NWTCPConnection] = [:]
-    private let tcpConnectionsLock = NSLock()
+    // one association per udp flow, holds both channels so we tear the whole thing
+    // down together when any side goes away
+    private final class UDPAssociation {
+        let clientFlow: NEAppProxyUDPFlow
+        let controlConnection: NWTCPConnection  // socks5 tcp control channel, keeps the association alive
+        let udpSession: NWUDPSession            // relay channel to the socks server
+        let processPath: String
+        var loggedDestinations = Set<String>()  // dedupe connection logs, bounded
+        var isTornDown = false
+
+        init(clientFlow: NEAppProxyUDPFlow, controlConnection: NWTCPConnection, udpSession: NWUDPSession, processPath: String) {
+            self.clientFlow = clientFlow
+            self.controlConnection = controlConnection
+            self.udpSession = udpSession
+            self.processPath = processPath
+        }
+    }
+    private var udpAssociations: [NEAppProxyUDPFlow: UDPAssociation] = [:]
+    private let udpLock = NSLock()
     
     override func handleAppMessage(_ messageData: Data, completionHandler: ((Data?) -> Void)?) {
         guard let message = try? JSONSerialization.jsonObject(with: messageData) as? [String: Any],
@@ -357,7 +399,10 @@ class AppProxyProvider: NETransparentProxyProvider {
                 var logsToSend: [[String: String]] = []
                 logsToSend.reserveCapacity(batchSize)
                 for _ in 0..<batchSize {
-                    logsToSend.append(logBuffer[logHead])
+                    if let entry = logBuffer[logHead] {
+                        logsToSend.append(entry.toDict())
+                    }
+                    logBuffer[logHead] = nil  // release the drained entry
                     logHead = (logHead + 1) % AppProxyProvider.logCapacity
                     logCount -= 1
                 }
@@ -395,7 +440,6 @@ class AppProxyProvider: NETransparentProxyProvider {
             }
             completionHandler?(try? JSONSerialization.data(withJSONObject: ["status": "ok"]))
 
-        
         case "addRule":
             if let ruleData = try? JSONSerialization.data(withJSONObject: message),
                var rule = try? JSONDecoder().decode(ProxyRule.self, from: ruleData) {
@@ -423,81 +467,6 @@ class AppProxyProvider: NETransparentProxyProvider {
                 completionHandler?(try? JSONSerialization.data(withJSONObject: response))
             }
         
-        case "updateRule":
-            if let ruleId = message["ruleId"] as? UInt32,
-               let ruleData = try? JSONSerialization.data(withJSONObject: message),
-               let updatedRule = try? JSONDecoder().decode(ProxyRule.self, from: ruleData) {
-                rulesLock.lock()
-                if let index = rules.firstIndex(where: { $0.ruleId == ruleId }) {
-                    var rule = updatedRule
-                    rule.ruleId = ruleId
-                    rules[index] = rule
-                    rulesLock.unlock()
-                    log("Updated rule #\(ruleId): \(rule.processNames) -> \(rule.action)")
-                    let response: [String: Any] = ["status": "ok", "ruleId": ruleId]
-                    completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-                } else {
-                    rulesLock.unlock()
-                    let response = ["status": "error", "message": "Rule not found"]
-                    completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-                }
-            } else {
-                let response = ["status": "error", "message": "Invalid update data"]
-                completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-            }
-        
-        case "toggleRule":
-            if let ruleId = message["ruleId"] as? UInt32,
-               let enabled = message["enabled"] as? Bool {
-                rulesLock.lock()
-                if let index = rules.firstIndex(where: { $0.ruleId == ruleId }) {
-                    rules[index].enabled = enabled
-                    rulesLock.unlock()
-                    log("Rule #\(ruleId) \(enabled ? "enabled" : "disabled")")
-                    let response: [String: Any] = ["status": "ok", "ruleId": ruleId, "enabled": enabled]
-                    completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-                } else {
-                    rulesLock.unlock()
-                    let response = ["status": "error", "message": "Rule not found"]
-                    completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-                }
-            } else {
-                let response = ["status": "error", "message": "Missing ruleId or enabled"]
-                completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-            }
-        
-        case "removeRule":
-            if let ruleId = message["ruleId"] as? UInt32 {
-                rulesLock.lock()
-                let beforeCount = rules.count
-                rules.removeAll { $0.ruleId == ruleId }
-                let removed = beforeCount - rules.count
-                rulesLock.unlock()
-                log("Removed rule #\(ruleId)")
-                let response: [String: Any] = ["status": "ok", "removed": removed]
-                completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-            } else {
-                let response = ["status": "error", "message": "Missing ruleId"]
-                completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-            }
-        
-        case "listRules":
-            rulesLock.lock()
-            let rulesList = rules.map { rule -> [String: Any] in
-                return [
-                    "ruleId": rule.ruleId,
-                    "processNames": rule.processNames,
-                    "targetHosts": rule.targetHosts,
-                    "targetPorts": rule.targetPorts,
-                    "protocol": rule.ruleProtocol.rawValue,
-                    "action": rule.action,
-                    "enabled": rule.enabled
-                ]
-            }
-            rulesLock.unlock()
-            let response: [String: Any] = ["status": "ok", "rules": rulesList]
-            completionHandler?(try? JSONSerialization.data(withJSONObject: response))
-        
         case "clearRules":
             rulesLock.lock()
             let count = rules.count
@@ -507,12 +476,12 @@ class AppProxyProvider: NETransparentProxyProvider {
             let response: [String: Any] = ["status": "ok", "cleared": count]
             completionHandler?(try? JSONSerialization.data(withJSONObject: response))
         
-        case "setRules":
-            if let rules = message["rules"] as? [[String: String]] {
-                log("Rules updated: \(rules.count) rules")
-            }
-            let response = ["status": "ok"]
-            completionHandler?(try? JSONSerialization.data(withJSONObject: response))
+        case "clearConfig":
+            // drop the stored proxy configs so credentials don't sit in memory after stop
+            proxyLock.lock()
+            storedProxyConfigs.removeAll()
+            proxyLock.unlock()
+            completionHandler?(try? JSONSerialization.data(withJSONObject: ["status": "ok"]))
         default:
             completionHandler?(nil)
         }
@@ -531,7 +500,6 @@ class AppProxyProvider: NETransparentProxyProvider {
         } else if let udpFlow = flow as? NEAppProxyUDPFlow {
             return handleUDPFlow(udpFlow)
         }
-        // unhandled flow types just pass through
         return false
     }
     
@@ -539,11 +507,11 @@ class AppProxyProvider: NETransparentProxyProvider {
         let metaData = flow.metaData
         let processPath = metaData.sourceAppSigningIdentifier
         
-        // early exit for own app traffic before any other work
+        // never proxy our own traffic, it would loop
         if processPath == "com.interceptsuite.ProxyBridge" || processPath == "com.interceptsuite.ProxyBridge.extension" {
             return false
         }
-        
+
         let remoteEndpoint = flow.remoteEndpoint
         var destination = ""
         var portNum: UInt16 = 0
@@ -651,40 +619,48 @@ class AppProxyProvider: NETransparentProxyProvider {
         }
     }
     
+    // handshake failed before an association existed, so drop the control
+    // connection and close the flow instead of leaking them
+    private func failUDPHandshake(_ clientFlow: NEAppProxyUDPFlow, _ tcpConnection: NWTCPConnection, _ reason: String) {
+        log(reason, level: "ERROR")
+        tcpConnection.cancel()
+        clientFlow.closeReadWithError(nil)
+        clientFlow.closeWriteWithError(nil)
+    }
+
     private func proxyUDPFlowViaSOCKS5(_ clientFlow: NEAppProxyUDPFlow, processPath: String, socksHost: String, socksPort: Int) {
         let proxyEndpoint = NWHostEndpoint(hostname: socksHost, port: String(socksPort))
         let tcpConnection = createTCPConnection(to: proxyEndpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
-        
-        let greeting: [UInt8] = [0x05, 0x01, 0x00]
-        let greetingData = Data(greeting)
-        
+
+        let greetingData = Data([0x05, 0x01, 0x00])
+
         tcpConnection.write(greetingData) { [weak self] error in
             guard let self = self else { return }
-            
+
             if let error = error {
-                self.log("SOCKS5 UDP greeting failed: \(error.localizedDescription)", level: "ERROR")
+                self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP greeting failed: \(error.localizedDescription)")
                 return
             }
-            
+
             tcpConnection.readMinimumLength(2, maximumLength: 2) { [weak self] data, error in
                 guard let self = self else { return }
-                
+
                 if let error = error {
-                    self.log("SOCKS5 UDP greeting response failed: \(error.localizedDescription)", level: "ERROR")
+                    self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP greeting response failed: \(error.localizedDescription)")
                     return
                 }
-                
+
                 guard let data = data, data.count == 2, data[1] == 0x00 else {
-                    self.log("SOCKS5 UDP greeting response failed", level: "ERROR")
+                    self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP greeting response invalid")
                     return
                 }
-                
-                self.sendSOCKS5UDPAssociate(clientFlow: clientFlow, tcpConnection: tcpConnection, processPath: processPath)
+
+                self.sendSOCKS5UDPAssociate(clientFlow: clientFlow, tcpConnection: tcpConnection, socksHost: socksHost, processPath: processPath)
             }
         }
     }
-    
-    private func sendSOCKS5UDPAssociate(clientFlow: NEAppProxyUDPFlow, tcpConnection: NWTCPConnection, processPath: String) {
+
+    private func sendSOCKS5UDPAssociate(clientFlow: NEAppProxyUDPFlow, tcpConnection: NWTCPConnection, socksHost: String, processPath: String) {
         var request = Data()
         request.append(0x05)
         request.append(0x03)
@@ -695,26 +671,32 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         tcpConnection.write(request) { [weak self] error in
             guard let self = self else { return }
-            
+
             if let error = error {
-                self.log("SOCKS5 UDP ASSOCIATE failed: \(error.localizedDescription)", level: "ERROR")
+                self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP ASSOCIATE failed: \(error.localizedDescription)")
                 return
             }
-            
+
             tcpConnection.readMinimumLength(10, maximumLength: 512) { [weak self] data, error in
                 guard let self = self else { return }
-                
+
                 if let error = error {
-                    self.log("SOCKS5 UDP ASSOCIATE response error: \(error.localizedDescription)", level: "ERROR")
+                    self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP ASSOCIATE response error: \(error.localizedDescription)")
                     return
                 }
-                
+
                 guard let data = data, data.count >= 10, data[0] == 0x05, data[1] == 0x00 else {
-                    self.log("SOCKS5 UDP ASSOCIATE rejected", level: "ERROR")
+                    self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP ASSOCIATE rejected")
                     return
                 }
-                
-                let (relayHost, relayPort) = self.parseSOCKS5Address(from: data, offset: 3)
+
+                let (parsedHost, relayPort) = self.parseSOCKS5Address(from: data, offset: 3)
+                // many socks servers reply 0.0.0.0 meaning "reuse the control connection host"
+                let relayHost = (parsedHost == "0.0.0.0" || parsedHost == "::" || parsedHost.isEmpty) ? socksHost : parsedHost
+                guard relayPort != 0 else {
+                    self.failUDPHandshake(clientFlow, tcpConnection, "SOCKS5 UDP ASSOCIATE returned no relay port")
+                    return
+                }
                 self.relayUDPThroughSOCKS5(clientFlow: clientFlow, relayHost: relayHost, relayPort: relayPort, tcpConnection: tcpConnection, processPath: processPath)
             }
         }
@@ -756,102 +738,133 @@ class AppProxyProvider: NETransparentProxyProvider {
         let relayEndpoint = NWHostEndpoint(hostname: relayHost, port: String(relayPort))
         let udpSession = self.createUDPSession(to: relayEndpoint, from: nil)
 
-        tcpConnectionsLock.lock()
-        udpTCPConnections[clientFlow] = tcpConnection
-        tcpConnectionsLock.unlock()
+        let association = UDPAssociation(clientFlow: clientFlow, controlConnection: tcpConnection, udpSession: udpSession, processPath: processPath)
 
-        readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
-        readAndForwardRelayUDP(clientFlow: clientFlow, udpSession: udpSession)
+        udpLock.lock()
+        let existing = udpAssociations[clientFlow]
+        udpAssociations[clientFlow] = association
+        udpLock.unlock()
+        // if the app reused a flow, drop the stale association first
+        existing?.controlConnection.cancel()
+        existing?.udpSession.cancel()
+
+        readAndForwardClientUDP(association)
+        readAndForwardRelayUDP(association)
+        monitorControlConnection(association)
     }
 
-    private func cleanupUDPFlow(_ flow: NEAppProxyUDPFlow) {
-        tcpConnectionsLock.lock()
-        let conn = udpTCPConnections.removeValue(forKey: flow)
-        tcpConnectionsLock.unlock()
-        conn?.cancel()
+    // idempotent, cancels both channels and closes the flow exactly once
+    private func teardownUDP(_ flow: NEAppProxyUDPFlow) {
+        udpLock.lock()
+        guard let assoc = udpAssociations.removeValue(forKey: flow), !assoc.isTornDown else {
+            udpLock.unlock()
+            return
+        }
+        assoc.isTornDown = true
+        udpLock.unlock()
+
+        assoc.controlConnection.cancel()
+        assoc.udpSession.cancel()
+        flow.closeReadWithError(nil)
+        flow.closeWriteWithError(nil)
     }
-    
-    private func readAndForwardClientUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession, processPath: String) {
-        var isFirstPacket = true
-        
+
+    // the socks control channel carries no data during a udp associate, so any
+    // completion here means the server dropped it and the association is dead
+    private func monitorControlConnection(_ association: UDPAssociation) {
+        let clientFlow = association.clientFlow
+        association.controlConnection.readMinimumLength(1, maximumLength: 1) { [weak self] _, _ in
+            self?.teardownUDP(clientFlow)
+        }
+    }
+
+    private func readAndForwardClientUDP(_ association: UDPAssociation) {
+        let clientFlow = association.clientFlow
         clientFlow.readDatagrams { [weak self] datagrams, endpoints, error in
             guard let self = self else { return }
 
             if let error = error {
                 self.log("UDP read error: \(error.localizedDescription)", level: "ERROR")
-                self.cleanupUDPFlow(clientFlow)
-                return
-            }
-            
-            // empty datagrams with no error = flow closed cleanly
-            guard let datagrams = datagrams, let endpoints = endpoints else {
-                self.cleanupUDPFlow(clientFlow)
+                self.teardownUDP(clientFlow)
                 return
             }
 
-            // empty but non-nil = nothing arrived this read, keep going
+            // nil datagrams with no error = flow closed cleanly
+            guard let datagrams = datagrams, let endpoints = endpoints else {
+                self.teardownUDP(clientFlow)
+                return
+            }
+
+            // non-nil but empty = nothing this round, just re-arm
             guard !datagrams.isEmpty else {
-                self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
+                self.readAndForwardClientUDP(association)
                 return
             }
-            
-            for i in 0..<datagrams.count {
-                let datagram = datagrams[i]
-                let endpoint = endpoints[i]
-                
-                var destHost = ""
-                var destPort: UInt16 = 0
-                var portStr = ""
-                
-                if let nwHost = endpoint as? NWHostEndpoint {
-                    destHost = nwHost.hostname
-                    destPort = UInt16(nwHost.port) ?? 0
-                    portStr = nwHost.port
+
+            var toSend: [Data] = []
+            toSend.reserveCapacity(datagrams.count)
+
+            for i in 0..<min(datagrams.count, endpoints.count) {
+                guard let nwHost = endpoints[i] as? NWHostEndpoint else { continue }
+                let destHost = nwHost.hostname
+                let destPort = UInt16(nwHost.port) ?? 0
+                guard destPort != 0 else { continue }
+
+                // log each distinct destination once, cap the set so it can't grow forever
+                if !association.loggedDestinations.contains(destHost) {
+                    if association.loggedDestinations.count < 64 {
+                        association.loggedDestinations.insert(destHost)
+                    }
+                    self.sendLogToApp(protocol: "UDP", process: association.processPath, destination: destHost, port: nwHost.port, proxy: "SOCKS5")
                 }
-                
-                if isFirstPacket {
-                    isFirstPacket = false
-                    self.sendLogToApp(protocol: "UDP", process: processPath, destination: destHost, port: portStr, proxy: "SOCKS5")
-                }
-                
-                if let encapsulated = self.encapsulateSOCKS5UDP(datagram: datagram, destHost: destHost, destPort: destPort) {
-                    udpSession.writeDatagram(encapsulated, completionHandler: { error in
-                        if let error = error {
-                            self.log("UDP write error: \(error)", level: "ERROR")
-                        }
-                    })
+
+                if let encapsulated = self.encapsulateSOCKS5UDP(datagram: datagrams[i], destHost: destHost, destPort: destPort) {
+                    toSend.append(encapsulated)
                 }
             }
-            
-            self.readAndForwardClientUDP(clientFlow: clientFlow, udpSession: udpSession, processPath: processPath)
-        }
-    }
-    
-    private func readAndForwardRelayUDP(clientFlow: NEAppProxyUDPFlow, udpSession: NWUDPSession) {
-        udpSession.setReadHandler({ [weak self] datagrams, error in
-            guard let self = self else { return }
-            
-            if let error = error {
-                self.log("UDP relay error: \(error.localizedDescription)", level: "ERROR")
-                return
-            }
-            
-            if let datagrams = datagrams, !datagrams.isEmpty {
-                var unwrappedDatagrams: [Data] = []
-                var unwrappedEndpoints: [NWEndpoint] = []
-                
-                for datagram in datagrams {
-                    if let (unwrapped, destHost, destPort) = self.decapsulateSOCKS5UDPWithEndpoint(datagram: datagram) {
-                        unwrappedDatagrams.append(unwrapped)
-                        unwrappedEndpoints.append(NWHostEndpoint(hostname: destHost, port: String(destPort)))
+
+            if !toSend.isEmpty {
+                association.udpSession.writeMultipleDatagrams(toSend) { [weak self] error in
+                    if let error = error {
+                        self?.log("UDP write error: \(error.localizedDescription)", level: "ERROR")
                     }
                 }
-                
-                if !unwrappedDatagrams.isEmpty {
-                    clientFlow.writeDatagrams(unwrappedDatagrams, sentBy: unwrappedEndpoints) { error in
-                        if let error = error {
-                            self.log("UDP response write error: \(error.localizedDescription)", level: "ERROR")
-                        }
+            }
+
+            self.readAndForwardClientUDP(association)
+        }
+    }
+
+    private func readAndForwardRelayUDP(_ association: UDPAssociation) {
+        let clientFlow = association.clientFlow
+        association.udpSession.setReadHandler({ [weak self] datagrams, error in
+            guard let self = self else { return }
+
+            if let error = error {
+                // covers relay failures and icmp port-unreachable surfacing as a read error
+                self.log("UDP relay error: \(error.localizedDescription)", level: "ERROR")
+                self.teardownUDP(clientFlow)
+                return
+            }
+
+            guard let datagrams = datagrams, !datagrams.isEmpty else { return }
+
+            var payloads: [Data] = []
+            var endpoints: [NWEndpoint] = []
+            payloads.reserveCapacity(datagrams.count)
+            endpoints.reserveCapacity(datagrams.count)
+
+            for datagram in datagrams {
+                if let (payload, destHost, destPort) = self.decapsulateSOCKS5UDPWithEndpoint(datagram: datagram) {
+                    payloads.append(payload)
+                    endpoints.append(NWHostEndpoint(hostname: destHost, port: String(destPort)))
+                }
+            }
+
+            if !payloads.isEmpty {
+                clientFlow.writeDatagrams(payloads, sentBy: endpoints) { [weak self] error in
+                    if let error = error {
+                        self?.log("UDP response write error: \(error.localizedDescription)", level: "ERROR")
                     }
                 }
             }
@@ -875,13 +888,15 @@ class AppProxyProvider: NETransparentProxyProvider {
             header.append(0x04)
             header.append(contentsOf: ipv6.rawValue)
         } else {
-            guard destHost.count <= 255 else {
-                self.log("Domain name too long: \(destHost.count) bytes", level: "ERROR")
+            // length prefix must be the utf8 byte count, not the character count
+            let hostBytes = Array(destHost.utf8)
+            guard hostBytes.count <= 255 else {
+                self.log("Domain name too long: \(hostBytes.count) bytes", level: "ERROR")
                 return nil
             }
             header.append(0x03)
-            header.append(UInt8(destHost.count))
-            header.append(destHost.data(using: .utf8) ?? Data())
+            header.append(UInt8(hostBytes.count))
+            header.append(contentsOf: hostBytes)
         }
         
         header.append(UInt8(destPort >> 8))
@@ -898,30 +913,11 @@ class AppProxyProvider: NETransparentProxyProvider {
         return result
     }
     
-    private func decapsulateSOCKS5UDP(datagram: Data) -> Data? {
-        guard datagram.count > 10 else { return nil }
-        
-        let atyp = datagram[3]
-        var headerLen = 4
-        
-        if atyp == 0x01 {
-            headerLen += 6
-        } else if atyp == 0x04 {
-            headerLen += 18
-        } else if atyp == 0x03 {
-            let domainLen = Int(datagram[4])
-            headerLen += 1 + domainLen + 2
-        } else {
-            return nil
-        }
-        
-        guard datagram.count > headerLen else { return nil }
-        
-        return datagram[headerLen...]
-    }
-    
     private func decapsulateSOCKS5UDPWithEndpoint(datagram: Data) -> (Data, String, UInt16)? {
         guard datagram.count > 10 else { return nil }
+
+        // byte 2 is FRAG, we don't reassemble so drop any fragmented datagram
+        guard datagram[2] == 0x00 else { return nil }
 
         let atyp = datagram[3]
         var headerLen = 4
@@ -966,8 +962,6 @@ class AppProxyProvider: NETransparentProxyProvider {
     private func proxyTCPFlow(_ flow: NEAppProxyTCPFlow, destination: String, port: UInt16, config: StoredProxyConfig) {
         let proxyEndpoint = NWHostEndpoint(hostname: config.host, port: String(config.port))
         let proxyConnection = createTCPConnection(to: proxyEndpoint, enableTLS: false, tlsParameters: nil, delegate: nil)
-
-        proxyConnection.addObserver(self, forKeyPath: "state", options: .new, context: nil)
 
         switch config.type.lowercased() {
         case "socks5":
@@ -1276,9 +1270,6 @@ class AppProxyProvider: NETransparentProxyProvider {
         }
     }
     
-    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-    }
-    
     private func findMatchingRule(bundleId: String, processName: String?, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool) -> ProxyRule? {
         rulesLock.lock()
         let currentRules = rules
@@ -1288,54 +1279,44 @@ class AppProxyProvider: NETransparentProxyProvider {
         
         for rule in currentRules {
             guard rule.enabled else { continue }
-            
-            // check protocol first
+
             if rule.ruleProtocol != .both && rule.ruleProtocol != connectionProtocol {
                 continue
             }
-            
-            // if this is a wildcard process rule
+
             let isWildcardProcess = (rule.processNames == "*" || rule.processNames.isEmpty)
-            
+
             if isWildcardProcess {
-                // wildcard has specific filters
                 let hasIpFilter = (rule.targetHosts != "*" && !rule.targetHosts.isEmpty)
                 let hasPortFilter = (rule.targetPorts != "*" && !rule.targetPorts.isEmpty)
-                
+
                 if hasIpFilter || hasPortFilter {
-                    // wildcard with filters, check immediately
-                    if checkIpPort {
-                        if rule.matchesIP(destination) && rule.matchesPort(port) {
-                            return rule
-                        }
-                    } else {
-                        // for UDP without destination info, skip filtered wildcards
+                    // udp has no destination here, so a filtered wildcard can't match
+                    if checkIpPort, rule.matchesIP(destination), rule.matchesPort(port) {
+                        return rule
                     }
                     continue
                 }
-                
-                // pure wildcard, save it for later - only the first one
+
+                // pure wildcard, keep the first one as a fallback
                 if wildcardRule == nil {
                     wildcardRule = rule
                 }
                 continue
             }
-            
-            // specific process rule, see if it matches
+
             if rule.matchesProcess(bundleId: bundleId, processName: processName) {
-                // process matched, now check ip and port
                 if checkIpPort {
                     if rule.matchesIP(destination) && rule.matchesPort(port) {
                         return rule
                     }
                 } else {
-                    // no destination on udp, match on process alone
+                    // udp matches on process alone
                     return rule
                 }
             }
         }
 
-        // nothing matched, fall back to wildcard if we have one
         if let wildcardRule = wildcardRule {
             return wildcardRule
         }
@@ -1345,25 +1326,7 @@ class AppProxyProvider: NETransparentProxyProvider {
     
     private func sendLogToApp(protocol: String, process: String, destination: String, port: String, proxy: String) {
         guard trafficLoggingEnabled else { return }
-        
-        let logData: [String: String] = [
-            "type": "connection",
-            "protocol": `protocol`,
-            "process": process,
-            "destination": destination,
-            "port": port,
-            "proxy": proxy
-        ]
-        
-        logQueueLock.lock()
-        logBuffer[logTail] = logData
-        logTail = (logTail + 1) % AppProxyProvider.logCapacity
-        if logCount < AppProxyProvider.logCapacity {
-            logCount += 1
-        } else {
-            logHead = (logHead + 1) % AppProxyProvider.logCapacity
-        }
-        logQueueLock.unlock()
+        appendLog(.connection(proto: `protocol`, process: process, destination: destination, port: port, proxy: proxy))
     }
 }
 

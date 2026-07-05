@@ -56,14 +56,12 @@ class UpdateService {
             let currentVersion = getCurrentVersion()
             let latestVersion = parseVersion(release.tagName)
 
-            // Find the PKG installer in assets
             let pkgAsset = release.assets.first { asset in
                 asset.name.lowercased().hasSuffix(".pkg") &&
                 (asset.name.lowercased().contains("proxybridge") ||
                  asset.name.lowercased().contains("installer"))
             }
 
-            // a macOS pkg installer in the release is valid update
             let isUpdateAvailable = isNewerVersion(latestVersion, currentVersion) && pkgAsset != nil
 
             return VersionInfo(
@@ -95,23 +93,41 @@ class UpdateService {
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent(fileName)
 
-        // Remove existing file if any
         try? FileManager.default.removeItem(at: fileURL)
 
         var downloadedBytes: Int64 = 0
-        let data = NSMutableData()
+        var data = Data()
+        if totalBytes > 0 { data.reserveCapacity(Int(totalBytes)) }
+
+        // collect into a buffer and flush in chunks, and only report progress
+        // every ~256kb so we aren't hopping to the main actor for every byte
+        var buffer = [UInt8]()
+        buffer.reserveCapacity(65536)
+        let progressStep: Int64 = 256 * 1024
+        var lastReported: Int64 = 0
 
         for try await byte in asyncBytes {
-            var byteValue = byte
-            data.append(&byteValue, length: 1)
+            buffer.append(byte)
             downloadedBytes += 1
 
-            if totalBytes > 0 {
-                let progressValue = Double(downloadedBytes) / Double(totalBytes)
-                await MainActor.run {
-                    progress(progressValue)
-                }
+            if buffer.count >= 65536 {
+                data.append(contentsOf: buffer)
+                buffer.removeAll(keepingCapacity: true)
             }
+
+            if totalBytes > 0, downloadedBytes - lastReported >= progressStep {
+                lastReported = downloadedBytes
+                let progressValue = Double(downloadedBytes) / Double(totalBytes)
+                await MainActor.run { progress(progressValue) }
+            }
+        }
+
+        if !buffer.isEmpty {
+            data.append(contentsOf: buffer)
+        }
+
+        if totalBytes > 0 {
+            await MainActor.run { progress(1.0) }
         }
 
         try data.write(to: fileURL)
@@ -119,10 +135,8 @@ class UpdateService {
     }
 
     func installUpdateAndQuit(installerPath: URL) {
-        // Open the PKG installer
         NSWorkspace.shared.open(installerPath)
-
-        // Give the installer a moment to start, then quit
+        // let the installer come up before we quit
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             NSApplication.shared.terminate(nil)
         }

@@ -2,6 +2,7 @@ import Foundation
 import NetworkExtension
 import SystemExtensions
 import Combine
+import AppKit
 
 class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published var connections: [ConnectionLog] = []
@@ -14,18 +15,15 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     @Published private(set) var proxyConfigs: [ProxyConfig] = []
     
     private let maxLogEntries = 1000
-    // trim to 80% when limit hit to avoid trimming on each entry
+    // trim back to this when the cap is hit, so we don't shift on every entry
     private let trimToEntries = 800
     private let logPollingInterval = 1.0
     private let extensionIdentifier = "com.interceptsuite.ProxyBridge.extension"
-    // reuse formatter
-    // saves memory about 2% and speed up the ui
     private let timestampFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "HH:mm:ss"
         return f
     }()
-    // removed uuid and use int - memory usage and speed improved due to size
     private var connectionIdCounter: Int = 0
     private var activityIdCounter: Int = 0
     
@@ -83,11 +81,45 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         let message: String
     }
     
+    // when every window is hidden or minimized there's no point polling logs
+    private var isWindowVisible = true
+
     override init() {
         super.init()
+        // both arrays are capped at maxLogEntries, reserve up front so a busy
+        // session doesn't keep reallocating the backing storage as it fills
+        connections.reserveCapacity(maxLogEntries)
+        activityLogs.reserveCapacity(maxLogEntries)
         loadTrafficLoggingSetting()
         loadProxyConfig()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(occlusionChanged),
+            name: NSApplication.didChangeOcclusionStateNotification,
+            object: nil
+        )
         installAndStartProxy()
+    }
+
+    @objc private func occlusionChanged() {
+        isWindowVisible = NSApp.occlusionState.contains(.visible)
+        updatePollingState()
+    }
+
+    // single place that decides whether the poll timer should be running
+    private func updatePollingState() {
+        if isTrafficLoggingEnabled && tunnelSession != nil && isWindowVisible {
+            startLogPollingTimer()
+        } else {
+            stopLogPollingTimer()
+        }
+    }
+
+    private func stopLogPollingTimer() {
+        DispatchQueue.main.async { [weak self] in
+            self?.logTimer?.invalidate()
+            self?.logTimer = nil
+        }
     }
     
     private func loadTrafficLoggingSetting() {
@@ -98,13 +130,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         isTrafficLoggingEnabled.toggle()
         UserDefaults.standard.set(isTrafficLoggingEnabled, forKey: "trafficLoggingEnabled")
         sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
-        
-        if isTrafficLoggingEnabled {
-            startLogPollingTimer()
-        } else {
-            logTimer?.invalidate()
-            logTimer = nil
-        }
+        updatePollingState()
     }
     
     private func sendTrafficLoggingToExtension(_ enabled: Bool) {
@@ -294,7 +320,6 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             return
         }
         
-        // Clear all data from extension memory before stopping
         clearExtensionMemory(session: session) { [weak self] in
             guard let self = self else { return }
             
@@ -312,9 +337,8 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     private func clearExtensionMemory(session: NETunnelProviderSession, completion: @escaping () -> Void) {
-        // clear rules auto fix the #51 - and proxy rules become inactive after It closes
+        // clearing rules fixes #51 where rules stayed active after the app closed
         RuleManager.clearRules(session: session) { success, message in
-            //clear proxy config as well keep meory usage low for extesion 
             let clearConfigMessage: [String: Any] = [
                 "action": "clearConfig"
             ]
@@ -332,18 +356,15 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     private func setupLogPolling(session: NETunnelProviderSession) {
         tunnelSession = session
-        
         sendTrafficLoggingToExtension(isTrafficLoggingEnabled)
-        
-        if isTrafficLoggingEnabled {
-            startLogPollingTimer()
-        }
+        updatePollingState()
     }
     
     private func startLogPollingTimer() {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.logTimer?.invalidate()
+            // already running, don't reset the cadence
+            guard self.logTimer == nil else { return }
             self.logTimer = Timer.scheduledTimer(
                 withTimeInterval: self.logPollingInterval,
                 repeats: true
@@ -361,37 +382,59 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         
         try? session.sendProviderMessage(data) { [weak self] response in
             guard let self = self,
-                  let responseData = response else {
+                  let responseData = response,
+                  let logs = try? JSONSerialization.jsonObject(with: responseData) as? [[String: String]],
+                  !logs.isEmpty else {
                 return
             }
-            
-            if let logs = try? JSONSerialization.jsonObject(with: responseData) as? [[String: String]] {
-                DispatchQueue.main.async {
-                    for log in logs {
-                        if log["type"] == "connection" {
-                            self.handleConnectionLog(log)
-                        } else {
-                            self.handleActivityLog(log)
-                        }
+
+            // build the batch first, then touch the published arrays once each
+            // so a busy second is one ui update instead of a hundred
+            DispatchQueue.main.async {
+                var newConnections: [ConnectionLog] = []
+                var newActivity: [ActivityLog] = []
+                for log in logs {
+                    if log["type"] == "connection" {
+                        if let c = self.makeConnectionLog(log) { newConnections.append(c) }
+                    } else {
+                        if let a = self.makeActivityLog(log) { newActivity.append(a) }
                     }
                 }
+                self.appendConnections(newConnections)
+                self.appendActivity(newActivity)
             }
         }
     }
-    
-    private func handleConnectionLog(_ log: [String: String]) {
-        guard isTrafficLoggingEnabled else { return }
-        
+
+    private func appendConnections(_ items: [ConnectionLog]) {
+        guard !items.isEmpty else { return }
+        connections.append(contentsOf: items)
+        if connections.count > maxLogEntries {
+            connections.removeFirst(connections.count - trimToEntries)
+        }
+    }
+
+    private func appendActivity(_ items: [ActivityLog]) {
+        guard !items.isEmpty else { return }
+        activityLogs.append(contentsOf: items)
+        if activityLogs.count > maxLogEntries {
+            activityLogs.removeFirst(activityLogs.count - trimToEntries)
+        }
+    }
+
+    private func makeConnectionLog(_ log: [String: String]) -> ConnectionLog? {
+        guard isTrafficLoggingEnabled else { return nil }
+
         guard let proto = log["protocol"],
               let process = log["process"],
               let dest = log["destination"],
               let port = log["port"],
               let proxy = log["proxy"] else {
-            return
+            return nil
         }
-        
+
         connectionIdCounter &+= 1
-        let connectionLog = ConnectionLog(
+        return ConnectionLog(
             id: connectionIdCounter,
             timestamp: getCurrentTimestamp(),
             connectionProtocol: proto,
@@ -400,35 +443,23 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             port: port,
             proxy: proxy
         )
-        connections.append(connectionLog)
-        
-        // Trim in bulk to avoid O(n) shift on every entry at the limit
-        if connections.count > maxLogEntries {
-            connections.removeFirst(connections.count - trimToEntries)
-        }
     }
-    
-    private func handleActivityLog(_ log: [String: String]) {
+
+    private func makeActivityLog(_ log: [String: String]) -> ActivityLog? {
         guard let timestamp = log["timestamp"],
               let level = log["level"],
               let message = log["message"] else {
-            return
+            return nil
         }
-        
+
         activityIdCounter &+= 1
-        let activityLog = ActivityLog(
+        return ActivityLog(
             id: activityIdCounter,
             timestamp: timestamp,
             level: level,
             message: message
         )
-        activityLogs.append(activityLog)
-        
-        if activityLogs.count > maxLogEntries {
-            activityLogs.removeFirst(activityLogs.count - trimToEntries)
-        }
     }
-    
 
     func sendProxyConfigsToExtension(session: NETunnelProviderSession) {
         let configsArray: [[String: Any]] = proxyConfigs.map { config in
@@ -474,11 +505,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             level: level,
             message: message
         )
-        activityLogs.append(log)
-        
-        if activityLogs.count > maxLogEntries {
-            activityLogs.removeFirst(activityLogs.count - trimToEntries)
-        }
+        appendActivity([log])
     }
     
     private func getCurrentTimestamp() -> String {
@@ -486,6 +513,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     }
     
     deinit {
+        NotificationCenter.default.removeObserver(self)
         logTimer?.invalidate()
         stopProxy()
     }

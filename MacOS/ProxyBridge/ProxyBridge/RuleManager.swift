@@ -34,85 +34,6 @@ struct RuleManager {
         }
     }
     
-    static func updateRule(
-        session: NETunnelProviderSession,
-        ruleId: UInt32,
-        processNames: String,
-        targetHosts: String,
-        targetPorts: String,
-        protocol: String,
-        action: String,
-        enabled: Bool = true,
-        completion: @escaping (Bool, String) -> Void
-    ) {
-        sendMessage(
-            session: session,
-            action: "updateRule",
-            params: [
-                "ruleId": ruleId,
-                "processNames": processNames,
-                "targetHosts": targetHosts,
-                "targetPorts": targetPorts,
-                "ruleProtocol": `protocol`,
-                "ruleAction": action,
-                "enabled": enabled
-            ]
-        ) { success, result in
-            let message = success
-                ? "Rule #\(ruleId) updated successfully"
-                : (result?["message"] as? String ?? "Unknown error")
-            completion(success, message)
-        }
-    }
-    
-    static func toggleRule(
-        session: NETunnelProviderSession,
-        ruleId: UInt32,
-        enabled: Bool,
-        completion: @escaping (Bool, String) -> Void
-    ) {
-        sendMessage(
-            session: session,
-            action: "toggleRule",
-            params: ["ruleId": ruleId, "enabled": enabled]
-        ) { success, result in
-            let message = success
-                ? "Rule #\(ruleId) \(enabled ? "enabled" : "disabled")"
-                : (result?["message"] as? String ?? "Unknown error")
-            completion(success, message)
-        }
-    }
-    
-    static func removeRule(
-        session: NETunnelProviderSession,
-        ruleId: UInt32,
-        completion: @escaping (Bool, String) -> Void
-    ) {
-        sendMessage(
-            session: session,
-            action: "removeRule",
-            params: ["ruleId": ruleId]
-        ) { success, result in
-            let message = success
-                ? "Removed \(result?["removed"] as? Int ?? 0) rule(s)"
-                : (result?["message"] as? String ?? "Unknown error")
-            completion(success, message)
-        }
-    }
-    
-    static func listRules(
-        session: NETunnelProviderSession,
-        completion: @escaping (Bool, [[String: Any]]) -> Void
-    ) {
-        sendMessage(session: session, action: "listRules", params: [:]) { success, result in
-            if success, let rules = result?["rules"] as? [[String: Any]] {
-                completion(true, rules)
-            } else {
-                completion(false, [])
-            }
-        }
-    }
-    
     static func clearRules(
         session: NETunnelProviderSession,
         completion: @escaping (Bool, String) -> Void
@@ -151,50 +72,6 @@ struct RuleManager {
         }
     }
     
-    // Print rules in a nice format
-    static func printRules(_ rules: [[String: Any]]) {
-        if rules.isEmpty {
-            print("No rules configured")
-            return
-        }
-        
-        print("\n=== Proxy Rules ===")
-        print(String(format: "%-5s %-15s %-20s %-20s %-10s %-8s %-8s",
-                     "ID", "Process", "Hosts", "Ports", "Protocol", "Action", "Enabled"))
-        print(String(repeating: "-", count: 100))
-        
-        for rule in rules {
-            let ruleId = rule["ruleId"] as? UInt32 ?? 0
-            let processNames = (rule["processNames"] as? String ?? "*").prefix(15)
-            let targetHosts = (rule["targetHosts"] as? String ?? "*").prefix(20)
-            let targetPorts = (rule["targetPorts"] as? String ?? "*").prefix(20)
-            let proto = rule["protocol"] as? String ?? "BOTH"
-            let action = rule["action"] as? String ?? "DIRECT"
-            let enabled = rule["enabled"] as? Bool ?? true
-            
-            print(String(format: "%-5d %-15s %-20s %-20s %-10s %-8s %-8s",
-                         ruleId,
-                         String(processNames),
-                         String(targetHosts),
-                         String(targetPorts),
-                         proto,
-                         action,
-                         enabled ? "Yes" : "No"))
-        }
-        print("")
-    }
-    
-    static func saveRulesToUserDefaults(_ rules: [[String: Any]]) {
-        let rulesToSave = rules.map { rule -> [String: Any] in
-            var ruleData = rule
-            ruleData.removeValue(forKey: "ruleId")
-            return ruleData
-        }
-        UserDefaults.standard.set(rulesToSave, forKey: "proxyRules")
-    }
-    
-    // wipe the extension rules then push the current UserDefaults set back
-    // used after any edit so ids stay in sync and we never double up rules
     static func resyncRules(
         session: NETunnelProviderSession,
         completion: @escaping (Bool, Int) -> Void
@@ -209,33 +86,43 @@ struct RuleManager {
         completion: @escaping (Bool, Int) -> Void
     ) {
         let rules = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] ?? []
-        
         guard !rules.isEmpty else {
             completion(true, 0)
             return
         }
-        
-        var successCount = 0
-        let group = DispatchGroup()
-        
-        for rule in rules {
-            group.enter()
-            addRule(
-                session: session,
-                processNames: rule["processNames"] as? String ?? "",
-                targetHosts: rule["targetHosts"] as? String ?? "",
-                targetPorts: rule["targetPorts"] as? String ?? "",
-                protocol: rule["protocol"] as? String ?? "BOTH",
-                action: rule["action"] as? String ?? "DIRECT",
-                enabled: rule["enabled"] as? Bool ?? true
-            ) { success, _, _ in
-                if success { successCount += 1 }
-                group.leave()
-            }
+        // add one at a time so rule order matches the saved order and the
+        // running counter isn't touched from concurrent completion handlers
+        addRulesInOrder(session: session, rules: rules, index: 0, added: 0, completion: completion)
+    }
+
+    private static func addRulesInOrder(
+        session: NETunnelProviderSession,
+        rules: [[String: Any]],
+        index: Int,
+        added: Int,
+        completion: @escaping (Bool, Int) -> Void
+    ) {
+        guard index < rules.count else {
+            DispatchQueue.main.async { completion(true, added) }
+            return
         }
-        
-        group.notify(queue: .main) {
-            completion(true, successCount)
+        let rule = rules[index]
+        addRule(
+            session: session,
+            processNames: rule["processNames"] as? String ?? "",
+            targetHosts: rule["targetHosts"] as? String ?? "",
+            targetPorts: rule["targetPorts"] as? String ?? "",
+            protocol: rule["protocol"] as? String ?? "BOTH",
+            action: rule["action"] as? String ?? "DIRECT",
+            enabled: rule["enabled"] as? Bool ?? true
+        ) { success, _, _ in
+            addRulesInOrder(
+                session: session,
+                rules: rules,
+                index: index + 1,
+                added: added + (success ? 1 : 0),
+                completion: completion
+            )
         }
     }
 }
