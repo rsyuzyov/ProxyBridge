@@ -130,56 +130,85 @@ struct ProxyRule: Codable {
         return false
     }
     
-    private static func ipToInteger(_ ipString: String) -> UInt32? {
-        let octets = ipString.components(separatedBy: ".")
-        guard octets.count == 4 else { return nil }
-        
-        var result: UInt32 = 0
-        for octet in octets {
-            guard let value = UInt8(octet) else { return nil }
-            result = (result << 8) | UInt32(value)
-        }
-        return result
+    // raw bytes of a v4 (4) or v6 (16) address, nil if not an ip literal
+    private static func ipToBytes(_ ipString: String) -> [UInt8]? {
+        if let v4 = IPv4Address(ipString) { return Array(v4.rawValue) }
+        if let v6 = IPv6Address(ipString) { return Array(v6.rawValue) }
+        return nil
     }
-    
+
+    private static func compareBytes(_ a: [UInt8], _ b: [UInt8]) -> Int {
+        for i in 0..<min(a.count, b.count) where a[i] != b[i] {
+            return a[i] < b[i] ? -1 : 1
+        }
+        return 0
+    }
+
+    // full 8 hextet form of a v6 address, e.g. ["2001","db8","0",...]
+    private static func expandIPv6(_ ipString: String) -> [String]? {
+        guard let v6 = IPv6Address(ipString) else { return nil }
+        let bytes = Array(v6.rawValue)
+        var groups: [String] = []
+        for i in stride(from: 0, to: 16, by: 2) {
+            let value = (UInt16(bytes[i]) << 8) | UInt16(bytes[i + 1])
+            groups.append(String(format: "%x", value))
+        }
+        return groups
+    }
+
     private static func matchIPPattern(_ pattern: String, ipString: String) -> Bool {
         if pattern.isEmpty || pattern == "*" {
             return true
         }
-        
-        // ip range, e.g. 192.168.1.1-192.168.1.254
+
+        // range, works for v4 and v6, e.g. 10.0.0.1-10.0.0.254 or fe80::1-fe80::ff
         if pattern.contains("-") {
             let parts = pattern.components(separatedBy: "-")
-            if parts.count == 2 {
-                let startIP = parts[0].trimmingCharacters(in: .whitespaces)
-                let endIP = parts[1].trimmingCharacters(in: .whitespaces)
-                
-                if let startInt = ipToInteger(startIP),
-                   let endInt = ipToInteger(endIP),
-                   let targetInt = ipToInteger(ipString) {
-                    return targetInt >= startInt && targetInt <= endInt
-                }
+            guard parts.count == 2,
+                  let lo = ipToBytes(parts[0].trimmingCharacters(in: .whitespaces)),
+                  let hi = ipToBytes(parts[1].trimmingCharacters(in: .whitespaces)),
+                  let target = ipToBytes(ipString),
+                  lo.count == hi.count, target.count == lo.count else {
+                return false
             }
-            return false
+            return compareBytes(target, lo) >= 0 && compareBytes(target, hi) <= 0
         }
-        
-        // wildcard, e.g. 192.168.1.*
+
+        // v6 pattern (contains a colon)
+        if pattern.contains(":") {
+            return matchIPv6Pattern(pattern, ipString: ipString)
+        }
+
+        // v4 wildcard, e.g. 192.168.1.*
         let patternOctets = pattern.components(separatedBy: ".")
         let ipOctets = ipString.components(separatedBy: ".")
-        
         if patternOctets.count != 4 || ipOctets.count != 4 {
             return false
         }
-        
         for i in 0..<4 {
-            if patternOctets[i] == "*" {
-                continue
-            }
-            if patternOctets[i] != ipOctets[i] {
-                return false
-            }
+            if patternOctets[i] == "*" { continue }
+            if patternOctets[i] != ipOctets[i] { return false }
         }
         return true
+    }
+
+    private static func matchIPv6Pattern(_ pattern: String, ipString: String) -> Bool {
+        // prefix wildcard on leading hextets, e.g. 2001:db8:* (no :: compression)
+        if pattern.hasSuffix("*") {
+            guard let target = expandIPv6(ipString) else { return false }
+            var groups = pattern.lowercased().dropLast()
+                .split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+            if groups.last == "" { groups.removeLast() }
+            for (i, g) in groups.enumerated() {
+                guard i < 8, !g.isEmpty, let value = UInt16(g, radix: 16) else { return false }
+                if String(format: "%x", value) != target[i] { return false }
+            }
+            return true
+        }
+
+        // exact match, compared on normalized bytes so ::1 == 0:0:...:1
+        guard let p = ipToBytes(pattern), let t = ipToBytes(ipString) else { return false }
+        return p == t
     }
     
     private static func matchPortList(_ portList: String, port: UInt16) -> Bool {
@@ -1203,8 +1232,10 @@ class AppProxyProvider: NETransparentProxyProvider {
     }
     
     private func handleHTTPProxy(clientFlow: NEAppProxyTCPFlow, proxyConnection: NWTCPConnection, destination: String, port: UInt16, username: String?, password: String?) {
-        var request = "CONNECT \(destination):\(port) HTTP/1.1\r\n"
-        request += "Host: \(destination):\(port)\r\n"
+        // ipv6 literals must be bracketed in the request line and Host header
+        let host = IPv6Address(destination) != nil ? "[\(destination)]" : destination
+        var request = "CONNECT \(host):\(port) HTTP/1.1\r\n"
+        request += "Host: \(host):\(port)\r\n"
         
         if let username = username, let password = password {
             let credentials = "\(username):\(password)"

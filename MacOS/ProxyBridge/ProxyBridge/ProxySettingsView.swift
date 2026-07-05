@@ -184,20 +184,31 @@ struct ProxySettingsView: View {
     }
 
     private func checkTCPReachability(host: String, port: Int) -> Bool {
-        let sock = socket(AF_INET, SOCK_STREAM, 0)
-        guard sock >= 0 else { return false }
-        defer { Darwin.close(sock) }
+        // getaddrinfo handles ipv4, ipv6 and hostnames, so this works for any proxy
+        var hints = addrinfo()
+        hints.ai_family = AF_UNSPEC
+        hints.ai_socktype = SOCK_STREAM
 
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(port).bigEndian
-        inet_pton(AF_INET, host, &addr.sin_addr)
+        var result: UnsafeMutablePointer<addrinfo>?
+        guard getaddrinfo(host, String(port), &hints, &result) == 0 else { return false }
+        defer { freeaddrinfo(result) }
 
-        return withUnsafePointer(to: &addr) { ptr in
-            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockPtr in
-                connect(sock, sockPtr, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+        var candidate = result
+        while let addr = candidate {
+            let sock = socket(addr.pointee.ai_family, addr.pointee.ai_socktype, addr.pointee.ai_protocol)
+            if sock >= 0 {
+                // bound connect time so an unreachable host doesn't hang the test
+                var timeout = timeval(tv_sec: 3, tv_usec: 0)
+                setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
+                if connect(sock, addr.pointee.ai_addr, addr.pointee.ai_addrlen) == 0 {
+                    Darwin.close(sock)
+                    return true
+                }
+                Darwin.close(sock)
             }
+            candidate = addr.pointee.ai_next
         }
+        return false
     }
 }
 
