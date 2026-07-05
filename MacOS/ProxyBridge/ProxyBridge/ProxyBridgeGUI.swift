@@ -116,12 +116,18 @@ struct ProxyBridgeGUIApp: App {
             }
 
             CommandGroup(replacing: .help) {
+                Button("Documentation") {
+                    if let url = URL(string: "https://interceptsuite.com/docs/proxybridge/") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+
                 Button("Check for Updates...") {
                     openUpdateCheckWindow()
                 }
-                
+
                 Divider()
-                
+
                 Button("About ProxyBridge") {
                     openAboutWindow()
                 }
