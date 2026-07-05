@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 @main
 struct ProxyBridgeGUIApp: App {
@@ -66,6 +67,16 @@ struct ProxyBridgeGUIApp: App {
                     viewModel.deleteProfile(viewModel.activeProfile)
                 }
                 .disabled(viewModel.profiles.count <= 1)
+
+                Divider()
+
+                Button("Export \"\(viewModel.activeProfile)\"...") {
+                    exportActiveProfile()
+                }
+
+                Button("Import Profile...") {
+                    importProfileFromFile()
+                }
             }
 
             CommandGroup(replacing: .help) {
@@ -119,6 +130,33 @@ struct ProxyBridgeGUIApp: App {
     
     private func openUpdateCheckWindow() {
         NSApp.sendAction(#selector(AppDelegate.openUpdateCheck), to: nil, from: nil)
+    }
+
+    private func exportActiveProfile() {
+        let name = viewModel.activeProfile
+        guard let data = viewModel.exportProfileData(name) else { return }
+        let panel = NSSavePanel()
+        panel.title = "Export Profile"
+        panel.nameFieldStringValue = "\(name).pbprofile"
+        if let type = UTType(filenameExtension: "pbprofile") {
+            panel.allowedContentTypes = [type]
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            try? data.write(to: url)
+        }
+    }
+
+    private func importProfileFromFile() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Profile"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        var types: [UTType] = [.json]
+        if let pb = UTType(filenameExtension: "pbprofile") { types.insert(pb, at: 0) }
+        panel.allowedContentTypes = types
+        if panel.runModal() == .OK, let url = panel.url, let data = try? Data(contentsOf: url) {
+            viewModel.importProfile(from: data)
+        }
     }
 
     // small AppKit text prompt, SwiftUI has no clean text-input alert on macOS

@@ -245,8 +245,10 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         if old == activeProfile { flushWorkingSet(to: old) }
         d.set(d.data(forKey: profileConfigsKey(old)), forKey: profileConfigsKey(new))
         d.set(d.array(forKey: profileRulesKey(old)), forKey: profileRulesKey(new))
+        d.set(d.object(forKey: profileLoggingKey(old)), forKey: profileLoggingKey(new))
         d.removeObject(forKey: profileConfigsKey(old))
         d.removeObject(forKey: profileRulesKey(old))
+        d.removeObject(forKey: profileLoggingKey(old))
         if let i = profiles.firstIndex(of: old) { profiles[i] = new }
         d.set(profiles, forKey: "profiles")
         if activeProfile == old {
@@ -264,8 +266,59 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         let d = UserDefaults.standard
         d.removeObject(forKey: profileConfigsKey(name))
         d.removeObject(forKey: profileRulesKey(name))
+        d.removeObject(forKey: profileLoggingKey(name))
         profiles.removeAll { $0 == name }
         d.set(profiles, forKey: "profiles")
+    }
+
+    // build a portable .pbprofile json for a profile
+    func exportProfileData(_ name: String) -> Data? {
+        guard profiles.contains(name) else { return nil }
+        // make sure the active profile's snapshot reflects the latest edits
+        if name == activeProfile { flushWorkingSet(to: name) }
+        let d = UserDefaults.standard
+        let configsJSON = d.data(forKey: profileConfigsKey(name))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? []
+        let dict: [String: Any] = [
+            "name": name,
+            "trafficLoggingEnabled": d.object(forKey: profileLoggingKey(name)) as? Bool ?? true,
+            "proxyConfigs": configsJSON,
+            "proxyRules": d.array(forKey: profileRulesKey(name)) ?? []
+        ]
+        return try? JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys])
+    }
+
+    // create a new profile from a .pbprofile json and switch to it
+    @discardableResult
+    func importProfile(from data: Data) -> Bool {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        var base = (obj["name"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "Imported"
+        if base.isEmpty { base = "Imported" }
+        let name = uniqueProfileName(base)
+
+        let d = UserDefaults.standard
+        // re-encode the configs array back to the Data form we store, ids are kept
+        // so each rule's action still points at the right proxy config
+        if let configsJSON = obj["proxyConfigs"],
+           let configsData = try? JSONSerialization.data(withJSONObject: configsJSON) {
+            d.set(configsData, forKey: profileConfigsKey(name))
+        } else {
+            d.removeObject(forKey: profileConfigsKey(name))
+        }
+        d.set(obj["proxyRules"] as? [[String: Any]] ?? [], forKey: profileRulesKey(name))
+        d.set(obj["trafficLoggingEnabled"] as? Bool ?? true, forKey: profileLoggingKey(name))
+
+        profiles.append(name)
+        d.set(profiles, forKey: "profiles")
+        switchProfile(to: name)
+        return true
+    }
+
+    private func uniqueProfileName(_ base: String) -> String {
+        if !profiles.contains(base) { return base }
+        var i = 2
+        while profiles.contains("\(base) (\(i))") { i += 1 }
+        return "\(base) (\(i))"
     }
 
     private func saveProxyConfigs() {
