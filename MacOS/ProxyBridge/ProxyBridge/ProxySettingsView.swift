@@ -86,7 +86,7 @@ struct ProxySettingsView: View {
         } else {
             Table(viewModel.proxyConfigs) {
                 TableColumn("Name") { config in
-                    Text(config.name.isEmpty ? "—" : config.name)
+                    Text(config.name.isEmpty ? "=" : config.name)
                         .foregroundColor(config.name.isEmpty ? .secondary : .primary)
                 }
                 .width(140)

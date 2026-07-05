@@ -216,7 +216,7 @@ struct ProxyRulesView: View {
                     .width(32)
 
                     TableColumn("Name") { rule in
-                        Text(rule.name.isEmpty ? "—" : rule.name)
+                        Text(rule.name.isEmpty ? "=" : rule.name)
                             .foregroundColor(rule.name.isEmpty ? .secondary : .primary)
                     }
                     .width(min: 90, ideal: 120)

@@ -1,31 +1,22 @@
 import Foundation
 import AppKit
 
-struct GitHubRelease: Codable {
-    let tagName: String
-    let name: String
-    let prerelease: Bool
-    let publishedAt: String
-    let assets: [GitHubAsset]
-
-    enum CodingKeys: String, CodingKey {
-        case tagName = "tag_name"
-        case name
-        case prerelease
-        case publishedAt = "published_at"
-        case assets
-    }
+// the update manifest served at download.interceptsuite.com, one entry per platform
+struct UpdateManifest: Codable {
+    let macos: PlatformRelease
 }
 
-struct GitHubAsset: Codable {
-    let name: String
-    let browserDownloadUrl: String
-    let size: Int64
+struct PlatformRelease: Codable {
+    let version: String
+    let releaseDate: String
+    let download: String
+    let releaseNotes: String
 
     enum CodingKeys: String, CodingKey {
-        case name
-        case browserDownloadUrl = "browser_download_url"
-        case size
+        case version
+        case releaseDate = "release_date"
+        case download
+        case releaseNotes = "release_notes"
     }
 }
 
@@ -39,37 +30,33 @@ struct VersionInfo {
 }
 
 class UpdateService {
-    private let githubApiUrl = "https://api.github.com/repos/InterceptSuite/ProxyBridge/releases/latest"
+    private let manifestUrl = "https://download.interceptsuite.com/proxybridge.json"
 
     func checkForUpdates() async -> VersionInfo {
         do {
-            guard let url = URL(string: githubApiUrl) else {
-                return errorVersion("Invalid API URL")
+            guard let url = URL(string: manifestUrl) else {
+                return errorVersion("Invalid update URL")
             }
 
             var request = URLRequest(url: url)
             request.setValue("ProxyBridge-UpdateChecker", forHTTPHeaderField: "User-Agent")
+            request.cachePolicy = .reloadIgnoringLocalCacheData
 
             let (data, _) = try await URLSession.shared.data(for: request)
-            let release = try JSONDecoder().decode(GitHubRelease.self, from: data)
+            let manifest = try JSONDecoder().decode(UpdateManifest.self, from: data)
 
+            let mac = manifest.macos
             let currentVersion = getCurrentVersion()
-            let latestVersion = parseVersion(release.tagName)
-
-            let pkgAsset = release.assets.first { asset in
-                asset.name.lowercased().hasSuffix(".pkg") &&
-                (asset.name.lowercased().contains("proxybridge") ||
-                 asset.name.lowercased().contains("installer"))
-            }
-
-            let isUpdateAvailable = isNewerVersion(latestVersion, currentVersion) && pkgAsset != nil
+            let fileName = URL(string: mac.download)?.lastPathComponent ?? "ProxyBridge-Installer.pkg"
+            let isUpdateAvailable = isNewerVersion(mac.version, currentVersion)
+                && mac.download.lowercased().hasSuffix(".pkg")
 
             return VersionInfo(
                 currentVersion: currentVersion,
-                latestVersion: release.tagName,
+                latestVersion: "v\(mac.version)",
                 isUpdateAvailable: isUpdateAvailable,
-                downloadUrl: pkgAsset?.browserDownloadUrl,
-                fileName: pkgAsset?.name,
+                downloadUrl: mac.download,
+                fileName: fileName,
                 error: nil
             )
         } catch {
@@ -147,10 +134,6 @@ class UpdateService {
             return "v\(version)"
         }
         return "v3.1"
-    }
-
-    private func parseVersion(_ tagName: String) -> String {
-        return tagName.hasPrefix("v") ? String(tagName.dropFirst()) : tagName
     }
 
     private func isNewerVersion(_ latest: String, _ current: String) -> Bool {

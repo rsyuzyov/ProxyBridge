@@ -39,7 +39,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
         // name is optional, show type and host:port either way
         var displayName: String {
             let server = "\(type.uppercased()) \(host):\(port)"
-            return name.isEmpty ? server : "\(name) — \(server)"
+            return name.isEmpty ? server : "\(name) = \(server)"
         }
 
         init(id: String = UUID().uuidString, name: String = "", type: String, host: String, port: Int, username: String?, password: String?) {
