@@ -4,15 +4,21 @@ import UniformTypeIdentifiers
 import AppKit
 
 struct ProxyRule: Identifiable, Codable {
-    let id: UInt32
+    var localId: String
+    var name: String
     let processNames: String
     let targetHosts: String
     let targetPorts: String
     let ruleProtocol: String
     let action: String
     var enabled: Bool
-    
+
+    // localId is the stable gui side identity, ruleId in the extension is not stable
+    var id: String { localId }
+
     enum CodingKeys: String, CodingKey {
+        case localId
+        case name
         case processNames
         case targetHosts
         case targetPorts
@@ -20,30 +26,34 @@ struct ProxyRule: Identifiable, Codable {
         case action
         case enabled
     }
-    
+
     init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.id = 0
-        self.processNames = try container.decode(String.self, forKey: .processNames)
-        self.targetHosts = try container.decode(String.self, forKey: .targetHosts)
-        self.targetPorts = try container.decode(String.self, forKey: .targetPorts)
-        self.ruleProtocol = try container.decode(String.self, forKey: .ruleProtocol)
-        self.action = try container.decode(String.self, forKey: .action)
-        self.enabled = try container.decode(Bool.self, forKey: .enabled)
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.localId = try c.decodeIfPresent(String.self, forKey: .localId) ?? UUID().uuidString
+        self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+        self.processNames = try c.decode(String.self, forKey: .processNames)
+        self.targetHosts = try c.decode(String.self, forKey: .targetHosts)
+        self.targetPorts = try c.decode(String.self, forKey: .targetPorts)
+        self.ruleProtocol = try c.decode(String.self, forKey: .ruleProtocol)
+        self.action = try c.decode(String.self, forKey: .action)
+        self.enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
     }
-    
+
     func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(processNames, forKey: .processNames)
-        try container.encode(targetHosts, forKey: .targetHosts)
-        try container.encode(targetPorts, forKey: .targetPorts)
-        try container.encode(ruleProtocol, forKey: .ruleProtocol)
-        try container.encode(action, forKey: .action)
-        try container.encode(enabled, forKey: .enabled)
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        // drop localId on export so imported rules get fresh ids
+        try c.encode(name, forKey: .name)
+        try c.encode(processNames, forKey: .processNames)
+        try c.encode(targetHosts, forKey: .targetHosts)
+        try c.encode(targetPorts, forKey: .targetPorts)
+        try c.encode(ruleProtocol, forKey: .ruleProtocol)
+        try c.encode(action, forKey: .action)
+        try c.encode(enabled, forKey: .enabled)
     }
-    
-    init(id: UInt32, processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: String, action: String, enabled: Bool) {
-        self.id = id
+
+    init(localId: String = UUID().uuidString, name: String = "", processNames: String, targetHosts: String, targetPorts: String, ruleProtocol: String, action: String, enabled: Bool) {
+        self.localId = localId
+        self.name = name
         self.processNames = processNames
         self.targetHosts = targetHosts
         self.targetPorts = targetPorts
@@ -51,15 +61,39 @@ struct ProxyRule: Identifiable, Codable {
         self.action = action
         self.enabled = enabled
     }
+
+    // UserDefaults stores rules as plain dictionaries, these bridge to that
+    init(dict: [String: Any]) {
+        self.localId = dict["localId"] as? String ?? UUID().uuidString
+        self.name = dict["name"] as? String ?? ""
+        self.processNames = dict["processNames"] as? String ?? ""
+        self.targetHosts = dict["targetHosts"] as? String ?? ""
+        self.targetPorts = dict["targetPorts"] as? String ?? ""
+        self.ruleProtocol = dict["protocol"] as? String ?? "BOTH"
+        self.action = dict["action"] as? String ?? "DIRECT"
+        self.enabled = dict["enabled"] as? Bool ?? true
+    }
+
+    func toDict() -> [String: Any] {
+        return [
+            "localId": localId,
+            "name": name,
+            "processNames": processNames,
+            "targetHosts": targetHosts,
+            "targetPorts": targetPorts,
+            "protocol": ruleProtocol,
+            "action": action,
+            "enabled": enabled
+        ]
+    }
 }
 
 struct ProxyRulesView: View {
     @ObservedObject var viewModel: ProxyBridgeViewModel
     @State private var rules: [ProxyRule] = []
-    @State private var selectedRuleIds: Set<UInt32> = []
+    @State private var selectedRuleIds: Set<String> = []
     @State private var showAddRule = false
     @State private var editingRule: ProxyRule?
-    @State private var isLoading = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -117,12 +151,7 @@ struct ProxyRulesView: View {
             }
             .padding()
             
-            if isLoading {
-                Spacer()
-                ProgressView()
-                    .scaleEffect(1.5)
-                Spacer()
-            } else if rules.isEmpty {
+            if rules.isEmpty {
                 Spacer()
                 VStack(spacing: 12) {
                     Image(systemName: "list.bullet.rectangle")
@@ -185,10 +214,16 @@ struct ProxyRulesView: View {
                     .width(140)
                     
                     TableColumn("SR") { rule in
-                        Text("\(rule.id)")
+                        Text("\((rules.firstIndex(where: { $0.id == rule.id }) ?? 0) + 1)")
                     }
-                    .width(50)
-                    
+                    .width(40)
+
+                    TableColumn("Name") { rule in
+                        Text(rule.name.isEmpty ? "—" : rule.name)
+                            .foregroundColor(rule.name.isEmpty ? .secondary : .primary)
+                    }
+                    .width(140)
+
                     TableColumn("Bundle ID") { rule in
                         Text(rule.processNames.isEmpty ? "Any" : rule.processNames)
                     }
@@ -224,10 +259,10 @@ struct ProxyRulesView: View {
             loadRules()
         }
         .sheet(isPresented: $showAddRule) {
-            RuleEditorView(viewModel: viewModel, onSave: { loadRules() })
+            RuleEditorView(viewModel: viewModel, onCommit: { commitRule($0) })
         }
         .sheet(item: $editingRule) { rule in
-            RuleEditorView(viewModel: viewModel, existingRule: rule, onSave: { loadRules() })
+            RuleEditorView(viewModel: viewModel, existingRule: rule, onCommit: { commitRule($0) })
         }
     }
     
@@ -256,47 +291,39 @@ struct ProxyRulesView: View {
         }
     }
     
+    // rules live in UserDefaults on the gui side, the extension is just a mirror
     private func loadRules() {
-        guard let session = viewModel.tunnelSession else { return }
-        
-        isLoading = true
-        RuleManager.listRules(session: session) { [self] success, rulesList in
-            DispatchQueue.main.async {
-                isLoading = false
-                if success {
-                    rules = rulesList.map(mapToProxyRule)
-                    RuleManager.saveRulesToUserDefaults(rulesList)
-                }
-            }
+        let dicts = UserDefaults.standard.array(forKey: "proxyRules") as? [[String: Any]] ?? []
+        rules = dicts.map { ProxyRule(dict: $0) }
+    }
+
+    // persist the current list and push it to the extension if the tunnel is up
+    private func saveAndSync() {
+        UserDefaults.standard.set(rules.map { $0.toDict() }, forKey: "proxyRules")
+        if let session = viewModel.tunnelSession {
+            RuleManager.resyncRules(session: session) { _, _ in }
         }
     }
-    
-    private func mapToProxyRule(_ dict: [String: Any]) -> ProxyRule {
-        ProxyRule(
-            id: dict["ruleId"] as? UInt32 ?? 0,
-            processNames: dict["processNames"] as? String ?? "",
-            targetHosts: dict["targetHosts"] as? String ?? "",
-            targetPorts: dict["targetPorts"] as? String ?? "",
-            ruleProtocol: dict["protocol"] as? String ?? "BOTH",
-            action: dict["action"] as? String ?? "DIRECT",
-            enabled: dict["enabled"] as? Bool ?? true
-        )
+
+    func commitRule(_ rule: ProxyRule) {
+        if let index = rules.firstIndex(where: { $0.localId == rule.localId }) {
+            rules[index] = rule
+        } else {
+            rules.append(rule)
+        }
+        saveAndSync()
     }
-    
+
     private func deleteRule(_ rule: ProxyRule) {
-        guard let session = viewModel.tunnelSession else { return }
-        
-        RuleManager.removeRule(session: session, ruleId: rule.id) { [self] success, _ in
-            if success { loadRules() }
-        }
+        rules.removeAll { $0.localId == rule.localId }
+        selectedRuleIds.remove(rule.localId)
+        saveAndSync()
     }
-    
+
     private func toggleRule(_ rule: ProxyRule, enabled: Bool) {
-        guard let session = viewModel.tunnelSession else { return }
-        
-        RuleManager.toggleRule(session: session, ruleId: rule.id, enabled: enabled) { [self] _, _ in
-            loadRules()
-        }
+        guard let index = rules.firstIndex(where: { $0.localId == rule.localId }) else { return }
+        rules[index].enabled = enabled
+        saveAndSync()
     }
     
     private func getSelectedRules() -> [ProxyRule] {
@@ -343,28 +370,12 @@ struct ProxyRulesView: View {
     }
     
     private func importRules(from url: URL) {
-        guard let session = viewModel.tunnelSession else { return }
-        
         do {
             let data = try Data(contentsOf: url)
-            let decoder = JSONDecoder()
-            let importedRules = try decoder.decode([ProxyRule].self, from: data)
-            
-            for rule in importedRules {
-                RuleManager.addRule(
-                    session: session,
-                    processNames: rule.processNames,
-                    targetHosts: rule.targetHosts,
-                    targetPorts: rule.targetPorts,
-                    protocol: rule.ruleProtocol,
-                    action: rule.action,
-                    enabled: rule.enabled
-                ) { _, _, _ in }
-            }
-            
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                loadRules()
-            }
+            let importedRules = try JSONDecoder().decode([ProxyRule].self, from: data)
+            // decode drops localId so each imported rule already has a fresh one
+            rules.append(contentsOf: importedRules)
+            saveAndSync()
         } catch {
             print("Failed to import rules: \(error)")
         }
@@ -374,25 +385,25 @@ struct ProxyRulesView: View {
 struct RuleEditorView: View {
     @ObservedObject var viewModel: ProxyBridgeViewModel
     var existingRule: ProxyRule?
-    var onSave: () -> Void
+    var onCommit: (ProxyRule) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
+    @State private var ruleName: String
     @State private var processNames: String
     @State private var targetHosts: String
     @State private var targetPorts: String
     @State private var selectedProtocol: String
     @State private var selectedAction: String
-    @State private var saveError: String = ""
-    @State private var isSaving = false
 
     private var isEditMode: Bool { existingRule != nil }
-    
-    init(viewModel: ProxyBridgeViewModel, existingRule: ProxyRule? = nil, onSave: @escaping () -> Void) {
+
+    init(viewModel: ProxyBridgeViewModel, existingRule: ProxyRule? = nil, onCommit: @escaping (ProxyRule) -> Void) {
         self.viewModel = viewModel
         self.existingRule = existingRule
-        self.onSave = onSave
+        self.onCommit = onCommit
 
+        _ruleName = State(initialValue: existingRule?.name ?? "")
         _processNames = State(initialValue: existingRule?.processNames ?? "*")
         _targetHosts = State(initialValue: existingRule?.targetHosts ?? "*")
         _targetPorts = State(initialValue: existingRule?.targetPorts ?? "*")
@@ -401,15 +412,22 @@ struct RuleEditorView: View {
         let defaultAction = existingRule?.action ?? viewModel.proxyConfigs.first?.id ?? "DIRECT"
         _selectedAction = State(initialValue: defaultAction)
     }
-    
+
     var body: some View {
         VStack(spacing: 20) {
             Text(isEditMode ? "Edit Rule" : "Add Rule")
                 .font(.title2)
                 .fontWeight(.semibold)
-            
+
             Form {
                 Section {
+                    formField(
+                        label: "Rule Name",
+                        placeholder: "Optional, e.g. Work traffic",
+                        text: $ruleName,
+                        hint: "Shown in the rules list. Leave empty if you don't need one."
+                    )
+
                     formField(
                         label: "Bundle Identifier (Package Name)",
                         placeholder: "*",
@@ -483,28 +501,19 @@ struct RuleEditorView: View {
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
-                
+
                 Spacer()
-                
-                Button(isSaving ? "Saving…" : "Save Rule") {
+
+                Button("Save Rule") {
                     saveRule()
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
-                .disabled(isSaving)
             }
             .padding(.horizontal)
-
-            if !saveError.isEmpty {
-                HStack(spacing: 6) {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundColor(.red)
-                    Text(saveError).font(.caption).foregroundColor(.red)
-                }
-                .padding(.horizontal)
-            }
         }
         .padding()
-        .frame(width: 600, height: 580)
+        .frame(width: 600, height: 620)
     }
     
     @ViewBuilder
@@ -521,54 +530,18 @@ struct RuleEditorView: View {
     }
     
     private func saveRule() {
-        guard let session = viewModel.tunnelSession else {
-            saveError = "Proxy is not running. Start the proxy before saving rules."
-            return
-        }
-        saveError = ""
-        isSaving = true
-        if let existing = existingRule {
-            updateExistingRule(session: session, ruleId: existing.id)
-        } else {
-            addNewRule(session: session)
-        }
-    }
-    
-    private func updateExistingRule(session: NETunnelProviderSession, ruleId: UInt32) {
-        RuleManager.updateRule(
-            session: session,
-            ruleId: ruleId,
+        let rule = ProxyRule(
+            localId: existingRule?.localId ?? UUID().uuidString,
+            name: ruleName.trimmingCharacters(in: .whitespaces),
             processNames: processNames,
             targetHosts: targetHosts,
             targetPorts: targetPorts,
-            protocol: selectedProtocol,
+            ruleProtocol: selectedProtocol,
             action: selectedAction,
-            enabled: true
-        ) { [self] success, _ in
-            DispatchQueue.main.async {
-                isSaving = false
-                if success { onSave(); dismiss() }
-                else { saveError = "Extension rejected the update. Check the proxy is running." }
-            }
-        }
-    }
-
-    private func addNewRule(session: NETunnelProviderSession) {
-        RuleManager.addRule(
-            session: session,
-            processNames: processNames,
-            targetHosts: targetHosts,
-            targetPorts: targetPorts,
-            protocol: selectedProtocol,
-            action: selectedAction,
-            enabled: true
-        ) { [self] success, _, _ in
-            DispatchQueue.main.async {
-                isSaving = false
-                if success { onSave(); dismiss() }
-                else { saveError = "Extension rejected the rule. Check the proxy is running." }
-            }
-        }
+            enabled: existingRule?.enabled ?? true
+        )
+        onCommit(rule)
+        dismiss()
     }
 }
 

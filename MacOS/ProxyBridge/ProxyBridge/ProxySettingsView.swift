@@ -19,7 +19,7 @@ struct ProxySettingsView: View {
             Divider()
             footerButtons
         }
-        .frame(minWidth: 760, idealWidth: 760, maxWidth: .infinity, minHeight: 440, idealHeight: 480, maxHeight: .infinity)
+        .frame(minWidth: 880, idealWidth: 880, maxWidth: .infinity, minHeight: 440, idealHeight: 480, maxHeight: .infinity)
         .alert("Delete Proxy?", isPresented: Binding(
             get: { deletingConfig != nil },
             set: { if !$0 { deletingConfig = nil } }
@@ -85,6 +85,12 @@ struct ProxySettingsView: View {
             Spacer()
         } else {
             Table(viewModel.proxyConfigs) {
+                TableColumn("Name") { config in
+                    Text(config.name.isEmpty ? "—" : config.name)
+                        .foregroundColor(config.name.isEmpty ? .secondary : .primary)
+                }
+                .width(140)
+
                 TableColumn("Type") { config in
                     Text(config.type.uppercased())
                         .foregroundColor(typeColor(config.type))
@@ -198,6 +204,7 @@ struct ProxyConfigEditorView: View {
     var existing: ProxyBridgeViewModel.ProxyConfig?
     @Environment(\.dismiss) private var dismiss
 
+    @State private var configName = ""
     @State private var proxyType = "socks5"
     @State private var proxyHost = ""
     @State private var proxyPort = ""
@@ -228,6 +235,8 @@ struct ProxyConfigEditorView: View {
 
             Form {
                 Section {
+                    formTextField(label: "Name", placeholder: "Optional, e.g. Home SOCKS", text: $configName)
+
                     VStack(alignment: .leading, spacing: 8) {
                         HStack { Text("Proxy Type").fontWeight(.medium); Text("*").foregroundColor(.red) }
                         Picker("Select proxy type", selection: $proxyType) {
@@ -278,6 +287,7 @@ struct ProxyConfigEditorView: View {
         .frame(width: 500, height: 520)
         .onAppear {
             if let e = existing {
+                configName = e.name
                 proxyType = e.type
                 proxyHost = e.host
                 proxyPort = String(e.port)
@@ -331,6 +341,7 @@ struct ProxyConfigEditorView: View {
         guard let port = Int(proxyPort) else { return }
         let config = ProxyBridgeViewModel.ProxyConfig(
             id: existing?.id ?? UUID().uuidString,
+            name: configName.trimmingCharacters(in: .whitespaces),
             type: proxyType,
             host: proxyHost,
             port: port,

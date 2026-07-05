@@ -31,21 +31,38 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
     
     struct ProxyConfig: Identifiable, Codable {
         let id: String
+        var name: String
         let type: String
         let host: String
         let port: Int
         let username: String?
         let password: String?
 
-        var displayName: String { "\(type.uppercased()) \(host):\(port)" }
+        // name is optional, show type and host:port either way
+        var displayName: String {
+            let server = "\(type.uppercased()) \(host):\(port)"
+            return name.isEmpty ? server : "\(name) — \(server)"
+        }
 
-        init(id: String = UUID().uuidString, type: String, host: String, port: Int, username: String?, password: String?) {
+        init(id: String = UUID().uuidString, name: String = "", type: String, host: String, port: Int, username: String?, password: String?) {
             self.id = id
+            self.name = name
             self.type = type
             self.host = host
             self.port = port
             self.username = username
             self.password = password
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.id = try c.decode(String.self, forKey: .id)
+            self.name = try c.decodeIfPresent(String.self, forKey: .name) ?? ""
+            self.type = try c.decode(String.self, forKey: .type)
+            self.host = try c.decode(String.self, forKey: .host)
+            self.port = try c.decode(Int.self, forKey: .port)
+            self.username = try c.decodeIfPresent(String.self, forKey: .username)
+            self.password = try c.decodeIfPresent(String.self, forKey: .password)
         }
     }
     
@@ -150,7 +167,7 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             if changed {
                 UserDefaults.standard.set(saved, forKey: "proxyRules")
                 if let session = tunnelSession {
-                    RuleManager.loadRulesFromUserDefaults(session: session) { _, _ in }
+                    RuleManager.resyncRules(session: session) { _, _ in }
                 }
             }
         }

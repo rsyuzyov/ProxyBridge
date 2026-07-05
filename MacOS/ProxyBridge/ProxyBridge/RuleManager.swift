@@ -193,6 +193,17 @@ struct RuleManager {
         UserDefaults.standard.set(rulesToSave, forKey: "proxyRules")
     }
     
+    // wipe the extension rules then push the current UserDefaults set back
+    // used after any edit so ids stay in sync and we never double up rules
+    static func resyncRules(
+        session: NETunnelProviderSession,
+        completion: @escaping (Bool, Int) -> Void
+    ) {
+        clearRules(session: session) { _, _ in
+            loadRulesFromUserDefaults(session: session, completion: completion)
+        }
+    }
+
     static func loadRulesFromUserDefaults(
         session: NETunnelProviderSession,
         completion: @escaping (Bool, Int) -> Void
