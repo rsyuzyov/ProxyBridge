@@ -26,6 +26,7 @@ struct VersionInfo {
     let isUpdateAvailable: Bool
     let downloadUrl: String?
     let fileName: String?
+    let releaseNotesUrl: String?
     let error: String?
 }
 
@@ -57,6 +58,7 @@ class UpdateService {
                 isUpdateAvailable: isUpdateAvailable,
                 downloadUrl: mac.download,
                 fileName: fileName,
+                releaseNotesUrl: mac.releaseNotes,
                 error: nil
             )
         } catch {
@@ -159,6 +161,7 @@ class UpdateService {
             isUpdateAvailable: false,
             downloadUrl: nil,
             fileName: nil,
+            releaseNotesUrl: nil,
             error: message
         )
     }

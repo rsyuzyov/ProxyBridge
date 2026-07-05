@@ -50,6 +50,15 @@ struct UpdateNotificationView: View {
             Text("A new version of ProxyBridge is available!")
                 .multilineTextAlignment(.center)
                 .foregroundColor(.secondary)
+
+            if let notes = versionInfo.releaseNotesUrl, let url = URL(string: notes) {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text")
+                        Text("View Release Notes")
+                    }
+                }
+            }
             
             // Download Progress
             if viewModel.isDownloading {

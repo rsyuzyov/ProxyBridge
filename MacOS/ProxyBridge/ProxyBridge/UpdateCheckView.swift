@@ -45,6 +45,15 @@ struct UpdateCheckView: View {
                 }
                 .padding(.horizontal)
             }
+
+            if let notes = viewModel.releaseNotesUrl, let url = URL(string: notes) {
+                Link(destination: url) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text")
+                        Text("View Release Notes")
+                    }
+                }
+            }
             
             // Error Message
             if viewModel.hasError {
@@ -120,7 +129,8 @@ class UpdateCheckViewModel: ObservableObject {
     @Published var isDownloading = false
     @Published var downloadProgress: Double = 0
     @Published var downloadStatus = ""
-    
+    @Published var releaseNotesUrl: String?
+
     private let updateService = UpdateService()
     private var versionInfo: VersionInfo?
     
@@ -136,6 +146,7 @@ class UpdateCheckViewModel: ObservableObject {
         currentVersion = info.currentVersion
         latestVersion = info.latestVersion
         isUpdateAvailable = info.isUpdateAvailable
+        releaseNotesUrl = info.isUpdateAvailable ? info.releaseNotesUrl : nil
         
         if let error = info.error {
             hasError = true
