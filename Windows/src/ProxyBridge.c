@@ -2572,7 +2572,35 @@ static void snoop_dns_response(const UINT8 *payload, int payload_len)
     }
 }
 
-// ── SOCKS5 CONNECT with ATYP_DOMAIN ──────────────────────────────────────────
+// Read and validate a SOCKS5 CONNECT reply accoring to RFC 1928
+// Goal -  The proxy picks the BND.ADDR
+// type in its reply  seperatly of the request's ATYP few proxies answer an IPv6 CONNECT with a 4-byte IPv4 0.0.0.0 BND.addr
+//  parse the 4-byte header
+// (VER REP RSV ATYP) and then drain the variable-length BND.ADDR + BND.PORT by ATYP
+static int socks5_read_connect_reply(SOCKET s, int *reply)
+{
+    unsigned char hdr[4];
+    int len = recv_n(s, (char*)hdr, 4);
+    if (reply) *reply = (len >= 2) ? hdr[1] : -1;
+    if (len != 4 || hdr[0] != SOCKS5_VERSION || hdr[1] != 0x00) return -1;
+
+    int drain;
+    if      (hdr[3] == SOCKS5_ATYP_IPV4) drain = 4 + 2;
+    else if (hdr[3] == SOCKS5_ATYP_IPV6) drain = 16 + 2;
+    else if (hdr[3] == SOCKS5_ATYP_DOMAIN)
+    {
+        unsigned char dlen;
+        if (recv_n(s, (char*)&dlen, 1) != 1) return -1;
+        drain = (int)dlen + 2;
+    }
+    else return -1;   // unknown ATYP
+
+    unsigned char scratch[270];   // max drain = 255 + 2 (domain) < 270
+    if (drain > 0 && recv_n(s, (char*)scratch, drain) != drain) return -1;
+    return 0;
+}
+
+// SOCKS5 CONNECT with ATYP_DOMAIN
 
 static int socks5_connect_domain(SOCKET s, const char *hostname, UINT16 dest_port, const PROXY_CONFIG *cfg)
 {
@@ -2619,34 +2647,11 @@ static int socks5_connect_domain(SOCKET s, const char *hostname, UINT16 dest_por
 
     if (send(s, (char*)buf, req_len, 0) != req_len) return -1;
 
-    // Read the 4-byte response header: VER REP RSV ATYP
-    len = recv_n(s, (char*)buf, 4);
-    if (len < 4 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    int reply;
+    if (socks5_read_connect_reply(s, &reply) != 0)
     {
-        log_message("SOCKS5 domain: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
+        log_message("SOCKS5 domain: CONNECT failed (reply=%d)", reply);
         return -1;
-    }
-
-    // Drain BND.ADDR + BND.PORT (we don't use them)
-    int drain = 0;
-    if      (buf[3] == SOCKS5_ATYP_IPV4)   drain = 4 + 2;
-    else if (buf[3] == SOCKS5_ATYP_IPV6)   drain = 16 + 2;
-    else if (buf[3] == SOCKS5_ATYP_DOMAIN)
-    {
-        unsigned char dlen_buf[1];
-        if (recv(s, (char*)dlen_buf, 1, 0) != 1) return -1;
-        drain = (int)dlen_buf[0] + 2;
-    }
-    if (drain > 0)
-    {
-        unsigned char scratch[270];
-        int total = 0;
-        while (total < drain)
-        {
-            int n = recv(s, (char*)(scratch + total), drain - total, 0);
-            if (n <= 0) return -1;
-            total += n;
-        }
     }
     return 0;
 }
@@ -2749,10 +2754,10 @@ static int socks5_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROX
         return -1;
     }
 
-    len = recv_n(s, (char*)buf, 10);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    int reply;
+    if (socks5_read_connect_reply(s, &reply) != 0)
     {
-        log_message("SOCKS5: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
+        log_message("SOCKS5: CONNECT failed (reply=%d)", reply);
         return -1;
     }
 
@@ -2798,11 +2803,12 @@ static int socks5_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_por
 
     if (send(s, (char*)buf, 22, 0) != 22) return -1;
 
-    // response: VER(1)+REP(1)+RSV(1)+ATYP(1)+BND.ADDR(16)+BND.PORT(2) = 22
-    len = recv_n(s, (char*)buf, 22);
-    if (len < 4 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    // The proxy may reply with any BND.ADDR type (often IPv4 0.0.0.0), not necessarily
+    // IPv6 - so parse the reply by ATYP instead of demanding a fixed 22-byte response.
+    int reply;
+    if (socks5_read_connect_reply(s, &reply) != 0)
     {
-        log_message("SOCKS5 IPv6: CONNECT failed (reply=%d)", len > 1 ? buf[1] : -1);
+        log_message("SOCKS5 IPv6: CONNECT failed (reply=%d)", reply);
         return -1;
     }
     return 0;
