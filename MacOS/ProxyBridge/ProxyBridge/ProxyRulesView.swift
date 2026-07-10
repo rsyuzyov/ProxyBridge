@@ -443,7 +443,7 @@ struct RuleEditorView: View {
                         label: "Target hosts",
                         placeholder: "*",
                         text: $targetHosts,
-                        hint: "IPv4: 127.0.0.1; 192.168.1.*; 10.0.0.1-10.0.0.254   IPv6: ::1; 2001:db8:*; fe80::1-fe80::ff"
+                        hint: "IP: 127.0.0.1; 192.168.1.*; 10.0.0.1-10.0.0.254; ::1   Domain: github.com; *.github.com; *google*"
                     )
                     
                     formField(

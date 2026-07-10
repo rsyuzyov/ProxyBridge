@@ -64,7 +64,29 @@ struct ProxyRule: Codable {
     func matchesIP(_ ipString: String) -> Bool {
         return Self.matchIPList(targetHosts, ipString: ipString)
     }
-    
+
+    // matches targetHosts against the destination ip and any domains that
+    // resolved to it (from the dns proxy). a pattern can be an ip/range or a
+    // domain like *.github.com
+    func matchesHost(ip: String, domains: [String]) -> Bool {
+        if targetHosts.isEmpty || targetHosts == "*" { return true }
+        for raw in targetHosts.components(separatedBy: ";") {
+            let pattern = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if pattern.isEmpty { continue }
+            if Self.matchIPPattern(pattern, ipString: ip) { return true }
+
+            let lowered = pattern.lowercased()
+            // *.example.com also covers the apex example.com, which is what users expect
+            let apex = lowered.hasPrefix("*.") ? String(lowered.dropFirst(2)) : nil
+            for domain in domains {
+                if Self.globMatch(lowered, domain) { return true }
+                if let apex = apex, domain == apex { return true }
+            }
+        }
+        return false
+    }
+
+
     func matchesPort(_ port: UInt16) -> Bool {
         return Self.matchPortList(targetPorts, port: port)
     }
@@ -556,24 +578,29 @@ class AppProxyProvider: NETransparentProxyProvider {
         let processName = getProcessName(from: metaData)
         let displayName = processName ?? processPath
         
+        // domains that resolved to this ip (from the dns proxy), used for domain
+        // rules and to show the hostname in the log instead of the raw ip
+        let domains = DNSMapStore.shared.domains(forIP: destination)
+        let logDest = domains.first ?? destination
+
         proxyLock.lock()
         let hasProxyConfig = !storedProxyConfigs.isEmpty
         proxyLock.unlock()
 
         if !hasProxyConfig {
-            sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: "Direct")
+            sendLogToApp(protocol: "TCP", process: displayName, destination: logDest, port: portStr, proxy: "Direct")
             return false
         }
 
-        let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, destination: destination, port: portNum, connectionProtocol: .tcp, checkIpPort: true)
+        let matchedRule = findMatchingRule(bundleId: processPath, processName: processName, destination: destination, port: portNum, connectionProtocol: .tcp, checkIpPort: true, domains: domains)
 
         if let rule = matchedRule {
             switch rule.action {
             case "DIRECT":
-                sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: "Direct")
+                sendLogToApp(protocol: "TCP", process: displayName, destination: logDest, port: portStr, proxy: "Direct")
                 return false
             case "BLOCK":
-                sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: "BLOCK")
+                sendLogToApp(protocol: "TCP", process: displayName, destination: logDest, port: portStr, proxy: "BLOCK")
                 flow.closeReadWithError(nil)
                 flow.closeWriteWithError(nil)
                 return true
@@ -583,15 +610,15 @@ class AppProxyProvider: NETransparentProxyProvider {
                 proxyLock.unlock()
                 guard let config = config else {
                     // rule points at a proxy that no longer exists, let it go direct
-                    sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: "Direct")
+                    sendLogToApp(protocol: "TCP", process: displayName, destination: logDest, port: portStr, proxy: "Direct")
                     return false
                 }
-                sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: proxyLabel(config))
+                sendLogToApp(protocol: "TCP", process: displayName, destination: logDest, port: portStr, proxy: proxyLabel(config))
                 proxyTCPFlow(flow, destination: destination, port: portNum, config: config)
                 return true
             }
         } else {
-            sendLogToApp(protocol: "TCP", process: displayName, destination: destination, port: portStr, proxy: "Direct")
+            sendLogToApp(protocol: "TCP", process: displayName, destination: logDest, port: portStr, proxy: "Direct")
             return false
         }
     }
@@ -893,15 +920,11 @@ class AppProxyProvider: NETransparentProxyProvider {
                 return
             }
 
-            // nil datagrams with no error = flow closed cleanly
-            guard let datagrams = datagrams, let endpoints = endpoints else {
+            // nil or empty datagrams with no error = flow closed for reading.
+            // re-arming on empty spins at 100% cpu because the read completes
+            // immediately forever once the flow is closed (issue #89 / pr #90)
+            guard let datagrams = datagrams, let endpoints = endpoints, !datagrams.isEmpty else {
                 self.teardownUDP(clientFlow)
-                return
-            }
-
-            // non-nil but empty = nothing this round, just re-arm
-            guard !datagrams.isEmpty else {
-                self.readAndForwardClientUDP(association)
                 return
             }
 
@@ -1367,13 +1390,13 @@ class AppProxyProvider: NETransparentProxyProvider {
         }
     }
     
-    private func findMatchingRule(bundleId: String, processName: String?, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool) -> ProxyRule? {
+    private func findMatchingRule(bundleId: String, processName: String?, destination: String, port: UInt16, connectionProtocol: RuleProtocol, checkIpPort: Bool, domains: [String] = []) -> ProxyRule? {
         rulesLock.lock()
         let currentRules = rules
         rulesLock.unlock()
-        
+
         var wildcardRule: ProxyRule? = nil
-        
+
         for rule in currentRules {
             guard rule.enabled else { continue }
 
@@ -1389,7 +1412,7 @@ class AppProxyProvider: NETransparentProxyProvider {
 
                 if hasIpFilter || hasPortFilter {
                     // udp has no destination here, so a filtered wildcard can't match
-                    if checkIpPort, rule.matchesIP(destination), rule.matchesPort(port) {
+                    if checkIpPort, rule.matchesHost(ip: destination, domains: domains), rule.matchesPort(port) {
                         return rule
                     }
                     continue
@@ -1404,7 +1427,7 @@ class AppProxyProvider: NETransparentProxyProvider {
 
             if rule.matchesProcess(bundleId: bundleId, processName: processName) {
                 if checkIpPort {
-                    if rule.matchesIP(destination) && rule.matchesPort(port) {
+                    if rule.matchesHost(ip: destination, domains: domains) && rule.matchesPort(port) {
                         return rule
                     }
                 } else {

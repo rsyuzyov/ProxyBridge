@@ -448,7 +448,28 @@ class ProxyBridgeViewModel: NSObject, ObservableObject {
             }
         }
     }
-    
+
+    // enables the dns proxy provider so the extension can see dns resolutions and
+    // build the ip -> domain map used for domain rules
+    func startDNSProxy() {
+        let manager = NEDNSProxyManager.shared()
+        manager.loadFromPreferences { [weak self] _ in
+            guard let self = self else { return }
+            let proto = NEDNSProxyProviderProtocol()
+            proto.providerBundleIdentifier = self.extensionIdentifier
+            manager.providerProtocol = proto
+            manager.localizedDescription = "ProxyBridge DNS"
+            manager.isEnabled = true
+            manager.saveToPreferences { error in
+                if let error = error {
+                    self.addLog("ERROR", "DNS proxy setup failed: \(error.localizedDescription)")
+                } else {
+                    self.addLog("INFO", "DNS proxy enabled")
+                }
+            }
+        }
+    }
+
     private func reloadAndStartTunnel(manager: NETransparentProxyManager) {
         manager.loadFromPreferences { [weak self] loadError in
             guard let self = self else { return }
@@ -710,6 +731,7 @@ extension ProxyBridgeViewModel: OSSystemExtensionRequestDelegate {
         DispatchQueue.main.async {
             self.addLog("INFO", "Extension installed successfully")
             self.startProxy()
+            self.startDNSProxy()
         }
     }
     
