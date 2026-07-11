@@ -878,10 +878,53 @@ static RuleAction check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_
     return action;
 }
 
+// Read exactly n bytes, looping over short reads. SOCKS5/HTTP replies can split
+// across TCP segments (common on high-latency remote proxies), so fixed-length
+// handshake reads must accumulate. Returns n on success, -1 on error/peer close.
+static int recv_n(int s, void *buf, size_t n)
+{
+    size_t got = 0;
+    while (got < n)
+    {
+        ssize_t r = recv(s, (char *)buf + got, n - got, 0);
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return (int)n;
+}
+
+// Read and validate a SOCKS5 CONNECT reply (RFC 1928). The proxy chooses the
+// BND.ADDR type in its reply independently of the request's ATYP - many proxies
+// answer with a 4-byte IPv4 0.0.0.0 even for other requests - so parse the 4-byte
+// header (VER REP RSV ATYP) then drain the variable BND.ADDR + BND.PORT by ATYP,
+// instead of assuming a fixed 10-byte reply. *reply gets REP (or -1) for logging.
+static int socks5_read_connect_reply(int s, int *reply)
+{
+    unsigned char hdr[4];
+    if (reply) *reply = -1;
+    if (recv_n(s, hdr, 4) != 4) return -1;
+    if (reply) *reply = hdr[1];
+    if (hdr[0] != SOCKS5_VERSION || hdr[1] != 0x00) return -1;
+
+    int drain;
+    if      (hdr[3] == SOCKS5_ATYP_IPV4) drain = 4 + 2;
+    else if (hdr[3] == 0x04 /* IPv6 */)  drain = 16 + 2;
+    else if (hdr[3] == 0x03 /* domain */)
+    {
+        unsigned char dlen;
+        if (recv_n(s, &dlen, 1) != 1) return -1;
+        drain = (int)dlen + 2;
+    }
+    else return -1;   // unknown ATYP
+
+    unsigned char scratch[270];   // max drain = 255 + 2 (domain) < 270
+    if (drain > 0 && recv_n(s, scratch, (size_t)drain) != drain) return -1;
+    return 0;
+}
+
 static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
 {
     unsigned char buf[SOCKS5_BUFFER_SIZE];
-    ssize_t len;
     bool use_auth = (g_proxy_username[0] != '\0');
 
     buf[0] = SOCKS5_VERSION;
@@ -907,8 +950,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         }
     }
 
-    len = recv(s, buf, 2, 0);
-    if (len != 2 || buf[0] != SOCKS5_VERSION)
+    if (recv_n(s, buf, 2) != 2 || buf[0] != SOCKS5_VERSION)
     {
         log_message("socks5 invalid auth response");
         return -1;
@@ -918,6 +960,11 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
     {
         size_t ulen = strlen(g_proxy_username);
         size_t plen = strlen(g_proxy_password);
+        if (ulen > 255 || plen > 255)   // SOCKS5 username/password fields are length-prefixed by one byte
+        {
+            log_message("socks5 credentials too long");
+            return -1;
+        }
         buf[0] = 0x01;
         buf[1] = (unsigned char)ulen;
         memcpy(buf + 2, g_proxy_username, ulen);
@@ -930,8 +977,7 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
             return -1;
         }
 
-        len = recv(s, buf, 2, 0);
-        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        if (recv_n(s, buf, 2) != 2 || buf[0] != 0x01 || buf[1] != 0x00)
         {
             log_message("socks5 authentication failed");
             return -1;
@@ -957,10 +1003,10 @@ static int socks5_connect(int s, uint32_t dest_ip, uint16_t dest_port)
         return -1;
     }
 
-    len = recv(s, buf, 10, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    int reply = -1;
+    if (socks5_read_connect_reply(s, &reply) != 0)
     {
-        log_message("socks5 connect failed status %d", len > 1 ? buf[1] : -1);
+        log_message("socks5 connect failed status %d", reply);
         return -1;
     }
 
@@ -1102,6 +1148,9 @@ static void* connection_handler(void *arg)
             close(proxy_sock);
             return NULL;
         }
+    }
+
+    // Data transfer phase (runs for both SOCKS5 and HTTP once the handshake succeeds).
     // Disable timeout for data transfer phase
     struct timeval zero_timeout = {0, 0};
     setsockopt(proxy_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
@@ -1438,8 +1487,7 @@ static void* local_proxy_server(void *arg)
 // socks5 udp associate
 static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
 {
-    unsigned char buf[512];
-    ssize_t len;
+    unsigned char buf[SOCKS5_BUFFER_SIZE];   // must hold 3 + 255 + 255 auth bytes
 
     // auth handshake
     bool use_auth = (g_proxy_username[0] != '\0');
@@ -1452,14 +1500,15 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     if (send(s, buf, use_auth ? 4 : 3, MSG_NOSIGNAL) != (use_auth ? 4 : 3))
         return -1;
 
-    len = recv(s, buf, 2, 0);
-    if (len != 2 || buf[0] != SOCKS5_VERSION)
+    if (recv_n(s, buf, 2) != 2 || buf[0] != SOCKS5_VERSION)
         return -1;
 
     if (buf[1] == 0x02 && use_auth)
     {
         size_t ulen = strlen(g_proxy_username);
         size_t plen = strlen(g_proxy_password);
+        if (ulen > 255 || plen > 255)
+            return -1;
         buf[0] = 0x01;
         buf[1] = (unsigned char)ulen;
         memcpy(buf + 2, g_proxy_username, ulen);
@@ -1469,8 +1518,7 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
         if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
             return -1;
 
-        len = recv(s, buf, 2, 0);
-        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        if (recv_n(s, buf, 2) != 2 || buf[0] != 0x01 || buf[1] != 0x00)
             return -1;
     }
     else if (buf[1] != SOCKS5_AUTH_NONE)
@@ -1487,21 +1535,22 @@ static int socks5_udp_associate(int s, struct sockaddr_in *relay_addr)
     if (send(s, buf, 10, MSG_NOSIGNAL) != 10)
         return -1;
 
-    len = recv(s, buf, 512, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    // Reply: VER REP RSV ATYP BND.ADDR BND.PORT. Parse the header then the bound
+    // relay endpoint; we only use IPv4 relay addresses.
+    unsigned char rep[4];
+    if (recv_n(s, rep, 4) != 4 || rep[0] != SOCKS5_VERSION || rep[1] != 0x00)
+        return -1;
+    if (rep[3] != SOCKS5_ATYP_IPV4)
+        return -1;
+    unsigned char ap[6];
+    if (recv_n(s, ap, 6) != 6)
         return -1;
 
-    // get relay address
-    if (buf[3] == SOCKS5_ATYP_IPV4)
-    {
-        memset(relay_addr, 0, sizeof(*relay_addr));
-        relay_addr->sin_family = AF_INET;
-        memcpy(&relay_addr->sin_addr.s_addr, buf + 4, 4);
-        memcpy(&relay_addr->sin_port, buf + 8, 2);
-        return 0;
-    }
-
-    return -1;
+    memset(relay_addr, 0, sizeof(*relay_addr));
+    relay_addr->sin_family = AF_INET;
+    memcpy(&relay_addr->sin_addr.s_addr, ap, 4);
+    memcpy(&relay_addr->sin_port, ap + 4, 2);
+    return 0;
 }
 
 static bool establish_udp_associate(void)
