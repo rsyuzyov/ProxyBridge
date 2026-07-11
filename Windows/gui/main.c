@@ -111,6 +111,7 @@ static HFONT     g_hMono, g_hUi;
 static HINSTANCE g_hInst;
 static NOTIFYICONDATAW g_tray;
 static BOOL      g_trayAdded = FALSE;
+static UINT      g_wmTaskbarCreated = 0;   // shell broadcast when the taskbar reappear
 static BOOL      g_reallyExit = FALSE;
 static BOOL      g_started = FALSE;
 
@@ -415,8 +416,9 @@ static void TrayAdd(HWND hwnd)
     g_tray.hIcon = (HICON)LoadImageW(g_hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
                                      GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     lstrcpynW(g_tray.szTip, APP_TITLE, ARRAYSIZE(g_tray.szTip));
-    Shell_NotifyIconW(NIM_ADD, &g_tray);
-    g_trayAdded = TRUE;
+    // NIM_ADD fails if the shell's tray is not ready yet
+    // broadcast re-adds the icon once the taskbar actually appears
+    g_trayAdded = Shell_NotifyIconW(NIM_ADD, &g_tray);
 }
 static void TrayRemove(void) { if (g_trayAdded) { Shell_NotifyIconW(NIM_DELETE, &g_tray); g_trayAdded = FALSE; } }
 static void ShowMainWindow(HWND hwnd) { ShowWindow(hwnd, SW_SHOW); ShowWindow(hwnd, SW_RESTORE); SetForegroundWindow(hwnd); }
@@ -533,10 +535,14 @@ static void DrawMenuBar2(HWND hwnd)
 // main window proc
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == g_wmTaskbarCreated && g_wmTaskbarCreated) { TrayAdd(hwnd); return 0; }
+
     switch (msg)
     {
     case WM_CREATE:
     {
+        g_wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+        ChangeWindowMessageFilterEx(hwnd, g_wmTaskbarCreated, MSGFLT_ALLOW, NULL);
         g_hUi   = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET,
                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
