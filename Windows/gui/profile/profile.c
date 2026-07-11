@@ -188,7 +188,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 if (r->type != J_OBJ) continue;
                 PBRule* ru = &p->rule[p->ruleCount++];
                 u2w(json_str(r, "Name", "ProxyBridge Rule"), ru->name, 128);
-                u2w(json_str(r, "ProcessName", "*"), ru->proc, 256);
+                u2w(json_str(r, "ProcessName", "*"), ru->proc, PB_APPS_MAX);
                 u2w(json_str(r, "TargetHosts", "*"), ru->hosts, 256);
                 u2w(json_str(r, "TargetPorts", "*"), ru->ports, 128);
                 u2w(json_str(r, "TargetDomains", "*"), ru->domains, 256);
@@ -218,7 +218,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
 
 static void put_kv_str(StrBuf* b, const char* indent, const char* key, const wchar_t* wval, const char* trail)
 {
-    char tmp[1024]; w2u(wval, tmp, sizeof(tmp));
+    char tmp[PB_APPS_MAX * 3 + 4]; w2u(wval, tmp, sizeof(tmp));   // UTF-8 worst case ~3 bytes/char
     sb_put(b, indent); sb_put(b, "\""); sb_put(b, key); sb_put(b, "\": ");
     sb_json_str(b, tmp); sb_put(b, trail);
 }

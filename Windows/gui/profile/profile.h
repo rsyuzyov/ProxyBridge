@@ -15,6 +15,7 @@
 #define PB_MAX_RULE    128
 #define PB_MAX_FILTER  64
 #define PB_NAME_MAX    64
+#define PB_APPS_MAX    1024   // Applications field: holds a "; "-separated list of many exes
 
 typedef struct {
     UINT32  storedId;              // Id as written in the profile
@@ -30,7 +31,7 @@ typedef struct {
 typedef struct {
     UINT32  nativeId;              // id returned by AddRule after apply
     wchar_t name[128];            // friendly label (GUI-only; not sent to the core)
-    wchar_t proc[256];
+    wchar_t proc[PB_APPS_MAX];
     wchar_t hosts[256];
     wchar_t ports[128];
     wchar_t domains[256];

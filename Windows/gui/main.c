@@ -238,7 +238,7 @@ static void ApplyRules(void)
     for (int i = 0; i < g_profile.ruleCount; i++)
     {
         PBRule* r = &g_profile.rule[i];
-        char proc[512], hosts[512], ports[256], domains[512];
+        char proc[2048], hosts[512], ports[256], domains[512];
         W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
         W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
         r->nativeId = g_api.AddRule(proc, hosts, ports, domains,
@@ -251,7 +251,7 @@ static void ApplyRules(void)
 // Add one rule to the engine, returning its (stable) native id. Enable state applied too.
 static UINT32 EngineAddRule(PBRule* r)
 {
-    char proc[512], hosts[512], ports[256], domains[512];
+    char proc[2048], hosts[512], ports[256], domains[512];
     W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
     W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
     UINT32 id = g_api.AddRule(proc, hosts, ports, domains,
@@ -263,7 +263,7 @@ static UINT32 EngineAddRule(PBRule* r)
 // Edit an existing rule in place - keeps the same native id and list position.
 static void EngineEditRule(PBRule* r)
 {
-    char proc[512], hosts[512], ports[256], domains[512];
+    char proc[2048], hosts[512], ports[256], domains[512];
     W2Ux(r->proc, proc, sizeof(proc)); W2Ux(r->hosts, hosts, sizeof(hosts));
     W2Ux(r->ports, ports, sizeof(ports)); W2Ux(r->domains, domains, sizeof(domains));
     g_api.EditRule(r->nativeId, proc, hosts, ports, domains,

@@ -409,8 +409,18 @@ static void RefreshRulesList(HWND lv)
     g_rulesRefreshing = FALSE;
 }
 
+// Append one application name to a "; "-separated list, respecting the existing separator.
+static void AppendApp(wchar_t* out, int cap, const wchar_t* name)
+{
+    if (!name || !name[0]) return;
+    size_t n = wcslen(out);
+    if (n == 0) { lstrcpynW(out, name, cap); return; }
+    const wchar_t* sep = (out[n - 1] == L';') ? L" " : L"; ";
+    _snwprintf_s(out + n, (size_t)cap - n, _TRUNCATE, L"%s%s", sep, name);
+}
+
 // Edit sub-dialog. lParam is a PBRule* seeded with current values; on OK it is written back
-// (proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
+// (name/proc/hosts/ports/domains/proto/action/cfgStoredId/enabled) and the dialog returns 1.
 INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg)
@@ -456,6 +466,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SendMessageW(ac, CB_SETDROPPEDWIDTH, 360, 0);
         // Seed fields from the rule.
         SetDlgItemTextW(dlg, IDC_RE_NAME,    r->name[0]    ? r->name    : L"ProxyBridge Rule");
+        SendDlgItemMessageW(dlg, IDC_RE_APPS, EM_LIMITTEXT, PB_APPS_MAX - 1, 0);
         SetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc[0]    ? r->proc    : L"*");
         SetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts[0]   ? r->hosts   : L"*");
         SetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports[0]   ? r->ports   : L"*");
@@ -496,27 +507,38 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         {
         case IDC_RE_BROWSE:
         {
-            // Pick an .exe and append just its file name.
-            wchar_t path[MAX_PATH] = L"";
+            // Pick one or more .exe files and append each file name to the list.
+            // Multi-select needs a buffer big enough for the folder + every file name.
+            static wchar_t files[8192];
+            files[0] = 0;
             OPENFILENAMEW ofn; ZeroMemory(&ofn, sizeof(ofn));
             ofn.lStructSize = sizeof(ofn); ofn.hwndOwner = dlg;
             ofn.lpstrFilter = L"Executables\0*.exe\0All Files\0*.*\0";
-            ofn.lpstrFile = path; ofn.nMaxFile = MAX_PATH;
-            ofn.lpstrTitle = L"Select Process Executable";
-            ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST;
+            ofn.lpstrFile = files; ofn.nMaxFile = ARRAYSIZE(files);
+            ofn.lpstrTitle = L"Select Process Executable(s)";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_PATHMUSTEXIST |
+                        OFN_ALLOWMULTISELECT | OFN_EXPLORER;
             if (GetOpenFileNameW(&ofn))
             {
-                const wchar_t* base = path;
-                for (const wchar_t* p = path; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
-                wchar_t cur[256]; GetDlgItemTextW(dlg, IDC_RE_APPS, cur, 256);
-                wchar_t out[256];
-                if (!cur[0] || (cur[0] == L'*' && cur[1] == 0))
-                    lstrcpynW(out, base, 256);
+                wchar_t out[PB_APPS_MAX];
+                GetDlgItemTextW(dlg, IDC_RE_APPS, out, PB_APPS_MAX);
+                if (!out[0] || (out[0] == L'*' && out[1] == 0)) out[0] = 0;   // replace empty/"*"
+
+                // OFN_EXPLORER multi-select layout:
+                //   single: "C:\dir\app.exe\0\0"          (one full path)
+                //   multi:  "C:\dir\0a.exe\0b.exe\0...\0\0" (folder, then bare names)
+                const wchar_t* dir = files;
+                const wchar_t* p = files + wcslen(files) + 1;
+                if (*p == 0)
+                {
+                    const wchar_t* base = dir;                 // single: strip to file name
+                    for (const wchar_t* q = dir; *q; q++) if (*q == L'\\' || *q == L'/') base = q + 1;
+                    AppendApp(out, ARRAYSIZE(out), base);
+                }
                 else
                 {
-                    size_t n = wcslen(cur);
-                    _snwprintf_s(out, 256, _TRUNCATE, L"%s%s%s", cur, (n && cur[n - 1] == L';') ? L" " : L"; ", base);
-                    out[255] = 0;
+                    for (; *p; p += wcslen(p) + 1)             // multi: each p is a bare file name
+                        AppendApp(out, ARRAYSIZE(out), p);
                 }
                 SetDlgItemTextW(dlg, IDC_RE_APPS, out);
             }
@@ -527,7 +549,7 @@ INT_PTR CALLBACK RuleEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             PBRule* r = (PBRule*)GetWindowLongPtrW(dlg, GWLP_USERDATA);
             GetDlgItemTextW(dlg, IDC_RE_NAME,    r->name,    128);
             if (!r->name[0]) lstrcpynW(r->name, L"ProxyBridge Rule", 128);
-            GetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc,    256);
+            GetDlgItemTextW(dlg, IDC_RE_APPS,    r->proc,    PB_APPS_MAX);
             GetDlgItemTextW(dlg, IDC_RE_HOSTS,   r->hosts,   256);
             GetDlgItemTextW(dlg, IDC_RE_PORTS,   r->ports,   128);
             GetDlgItemTextW(dlg, IDC_RE_DOMAINS, r->domains, 256);
