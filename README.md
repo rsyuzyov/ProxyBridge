@@ -73,6 +73,11 @@ Visit our **[Official Download Page](https://interceptsuite.com/download/proxybr
 curl -Lo deploy.sh https://raw.githubusercontent.com/InterceptSuite/ProxyBridge/refs/heads/master/Linux/deploy.sh && sudo bash deploy.sh
 ```
 
+#### macOS via Homebrew (official):
+```bash
+brew install --cask proxybridge
+```
+
 #### Windows via winget:
 ```powershell
 winget install InterceptSuite.ProxyBridge
@@ -80,6 +85,9 @@ winget install InterceptSuite.ProxyBridge
 
 > [!WARNING]
 > The winget package is **community-maintained and not official**. It may lag behind releases or be unverified. For guaranteed-latest, verified builds always use the [Official Download Page](https://interceptsuite.com/download/proxybridge).
+
+
+
 
 > [!NOTE]
 > For historical versions, change logs, and direct access to raw assets, visit the [GitHub Releases](https://github.com/InterceptSuite/ProxyBridge/releases) page.

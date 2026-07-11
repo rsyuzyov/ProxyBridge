@@ -3,13 +3,18 @@ import SwiftUI
 struct AboutView: View {
     @Environment(\.dismiss) var dismiss
 
+    // read from the bundle so the About window always shows the built version
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—"
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Text("ProxyBridge")
                 .font(.system(size: 28, weight: .bold))
                 .foregroundColor(.accentColor)
 
-            Text("Version 3.1")
+            Text(verbatim: "Version \(appVersion)")
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
 

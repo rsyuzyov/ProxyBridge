@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="4.0.0"
+VERSION="4.1.0"
 
 if [ -f "$SCRIPT_DIR/.env" ]; then
     source "$SCRIPT_DIR/.env"
@@ -39,10 +39,21 @@ mkdir -p "$SCRIPT_DIR/build/component"
 
 cp -R "$APP_PATH" "$SCRIPT_DIR/build/component/"
 
+# strip AppleDouble junk so it never lands in the payload
+dot_clean "$SCRIPT_DIR/build/component" 2>/dev/null || true
+find "$SCRIPT_DIR/build/component" -name '._*' -delete 2>/dev/null || true
+
 echo "Creating installer package..."
+
+# force BundleIsRelocatable=false so the app always installs to /Applications.
+# otherwise macOS relocates the install onto any existing copy of the app it
+# finds on disk (bundle relocation), leaving /Applications empty.
+pkgbuild --analyze --root build/component build/component.plist
+/usr/libexec/PlistBuddy -c "Set :0:BundleIsRelocatable false" build/component.plist
 
 pkgbuild \
     --root build/component \
+    --component-plist build/component.plist \
     --identifier com.interceptsuite.ProxyBridge \
     --version "$VERSION" \
     --install-location /Applications \
@@ -63,7 +74,7 @@ cat > build/distribution.xml << 'EOF'
     <choice id="com.interceptsuite.ProxyBridge" visible="false">
         <pkg-ref id="com.interceptsuite.ProxyBridge"/>
     </choice>
-    <pkg-ref id="com.interceptsuite.ProxyBridge" version="4.0.0" onConclusion="none">temp.pkg</pkg-ref>
+    <pkg-ref id="com.interceptsuite.ProxyBridge" version="4.1.0" onConclusion="none">temp.pkg</pkg-ref>
 </installer-gui-script>
 EOF
 
