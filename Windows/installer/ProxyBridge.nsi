@@ -80,6 +80,12 @@ Section "MainSection" SEC01
   File "..\output\WinDivert.dll"
   File "..\output\WinDivert64.sys"
 
+  ; Remove leftover native libraries from the old C#/Avalonia GUI. The native C GUI
+  ; does not use them; without this an upgrade would keep these stale DLLs behind.
+  Delete "$INSTDIR\av_libglesv2.dll"
+  Delete "$INSTDIR\libHarfBuzzSharp.dll"
+  Delete "$INSTDIR\libSkiaSharp.dll"
+
   CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
   CreateShortCut "$SMPROGRAMS\${PRODUCT_NAME}\${PRODUCT_NAME}.lnk" "$INSTDIR\ProxyBridge.exe"
   CreateShortCut "$DESKTOP\${PRODUCT_NAME}.lnk" "$INSTDIR\ProxyBridge.exe"
