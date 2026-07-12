@@ -118,6 +118,9 @@ Section Uninstall
       Sleep 1500
   uninst_proceed:
 
+  ; Remove the "Run at Startup" logon task the GUI may have created.
+  nsExec::ExecToLog 'schtasks /Delete /F /TN "ProxyBridge"'
+
   ; Stop the WinDivert driver first so WinDivert64.sys isn't held open.
   nsExec::ExecToLog 'sc stop WinDivert'
   nsExec::ExecToLog 'sc delete WinDivert'
