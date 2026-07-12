@@ -139,6 +139,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         SetDlgItemTextW(dlg, IDC_SE_L_PORT,   T(S_L_PORT));
         SetDlgItemTextW(dlg, IDC_SE_L_PROTO,  T(S_L_PROTO));
         SetDlgItemTextW(dlg, IDC_SE_AUTH,     T(S_CHK_ENABLE));
+        SetDlgItemTextW(dlg, IDC_SE_SENDDOMAIN, T(S_CHK_SENDDOMAIN));
         SetDlgItemTextW(dlg, IDC_SE_L_USER,   T(S_L_USER));
         SetDlgItemTextW(dlg, IDC_SE_L_PASS,   T(S_L_PASS));
         SetDlgItemTextW(dlg, IDOK,            T(S_BTN_OK));
@@ -152,6 +153,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
         if (c->port[0]) SetDlgItemTextW(dlg, IDC_SE_PORT, c->port); else SetDlgItemInt(dlg, IDC_SE_PORT, 1080, FALSE);
         SetDlgItemTextW(dlg, IDC_SE_USER, c->user);
         SetDlgItemTextW(dlg, IDC_SE_PASS, c->pass);
+        CheckDlgButton(dlg, IDC_SE_SENDDOMAIN, c->sendDomain ? BST_CHECKED : BST_UNCHECKED);
         BOOL hasAuth = c->user[0] != 0;
         CheckDlgButton(dlg, IDC_SE_AUTH, hasAuth ? BST_CHECKED : BST_UNCHECKED);
         EnableWindow(GetDlgItem(dlg, IDC_SE_USER), hasAuth);
@@ -177,6 +179,7 @@ INT_PTR CALLBACK ServerEditDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             lstrcpynW(c->type, isHttp ? L"HTTP" : L"SOCKS5", 16);
             GetDlgItemTextW(dlg, IDC_SE_NAME, c->name, 128);
             GetDlgItemTextW(dlg, IDC_SE_ADDR, c->host, 128);
+            c->sendDomain = (IsDlgButtonChecked(dlg, IDC_SE_SENDDOMAIN) == BST_CHECKED) ? 1 : 0;
             if (!c->name[0]) lstrcpynW(c->name, c->host[0] ? c->host : L"Proxy Server", 128);
             GetDlgItemTextW(dlg, IDC_SE_PORT, c->port, 16);
             if (IsDlgButtonChecked(dlg, IDC_SE_AUTH) == BST_CHECKED)
@@ -321,11 +324,12 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
             if (g_profile.cfgCount >= PB_MAX_CFG) { MessageBoxW(dlg, L"Config limit reached.", APP_TITLE, MB_OK); return TRUE; }
             PBConfig c; ZeroMemory(&c, sizeof(c));
             lstrcpynW(c.name, L"Proxy Server", 128);
+            c.sendDomain = 1;   // default: let the proxy resolve DNS
             if (DialogBoxParamW(g_hInst, MAKEINTRESOURCEW(IDD_SERVER), dlg, ServerEditDlgProc, (LPARAM)&c) == 1)
             {
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
                 UINT32 id = g_api.AddProxyConfig((_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
-                                                 h, (unsigned short)_wtoi(c.port), u, p);
+                                                 h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
                 if (id > 0) { c.nativeId = id; c.storedId = id; g_profile.cfg[g_profile.cfgCount++] = c; SaveActive(); RefreshServerList(lv); }
                 else MessageBoxW(dlg, T(S_ERR_ADDCFG), APP_TITLE, MB_OK | MB_ICONERROR);
             }
@@ -341,7 +345,7 @@ INT_PTR CALLBACK ServersDlgProc(HWND dlg, UINT msg, WPARAM wp, LPARAM lp)
                 g_profile.cfg[sel] = c;
                 char h[256], u[256], p[256]; W2Ux(c.host, h, sizeof(h)); W2Ux(c.user, u, sizeof(u)); W2Ux(c.pass, p, sizeof(p));
                 g_api.EditProxyConfig(c.nativeId, (_wcsicmp(c.type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5,
-                                      h, (unsigned short)_wtoi(c.port), u, p);
+                                      h, (unsigned short)_wtoi(c.port), u, p, c.sendDomain ? TRUE : FALSE);
                 SaveActive(); RefreshServerList(lv);
                 ListView_SetItemState(lv, sel, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
             }

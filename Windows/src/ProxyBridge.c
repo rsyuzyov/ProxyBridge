@@ -147,6 +147,7 @@ typedef struct {
     UINT16 port;
     char username[256];
     char password[256];
+    BOOL send_domain_to_proxy;  // TRUE = proxy resolves DNS (send hostname), FALSE = send IP
     UINT32 resolved_ip;         // cached at add/edit time - avoids DNS per connection
     ULONGLONG last_udp_attempt;
     SOCKET udp_tcp_ctrl;
@@ -2825,11 +2826,11 @@ static int http_connect_v6(SOCKET s, const UINT8 dest_ip6[16], UINT16 dest_port,
     char addr_str[64];
     inet_ntop(AF_INET6, dest_ip6, addr_str, sizeof(addr_str));
 
-    // Use cached domain name if available so the proxy sees the hostname
+    // Use the cached hostname only if this config opts to let the proxy resolve DNS.
     char cached_domain[256];
     const char *host_part;
     char host_buf[270];  // big enough for [ipv6]:port or domain
-    if (dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+    if (cfg->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
     {
         host_part = cached_domain;
         strncpy_s(host_buf, sizeof(host_buf), cached_domain, _TRUNCATE);
@@ -2897,11 +2898,11 @@ static int http_connect(SOCKET s, UINT32 dest_ip, UINT16 dest_port, const PROXY_
     int status_code;
     BOOL use_auth = (cfg != NULL && cfg->username[0] != '\0');
 
-    // Use cached domain name if available so the proxy sees the hostname
+    // Use the cached hostname only if this config opts to let the proxy resolve DNS.
     char cached_domain[256];
     char ip_str[32];
     const char *host_part;
-    if (dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+    if (cfg->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
     {
         host_part = cached_domain;
     }
@@ -3804,16 +3805,18 @@ static DWORD WINAPI connection_handler(LPVOID arg)
     {
         int rc;
         char cached_domain[256];
+        // Per-config: only hand the hostname to the proxy (socks5h) when this config
+        // opts in; otherwise send the locally-resolved IP (socks5).
         if (is_ipv6)
         {
-            if (dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
+            if (proxy->send_domain_to_proxy && dns_cache_lookup_v6(dest_ip6, cached_domain, sizeof(cached_domain)))
                 rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
             else
                 rc = socks5_connect_v6(socks_sock, dest_ip6, dest_port, proxy);
         }
         else
         {
-            if (dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
+            if (proxy->send_domain_to_proxy && dns_cache_lookup(dest_ip, cached_domain, sizeof(cached_domain)))
                 rc = socks5_connect_domain(socks_sock, cached_domain, dest_port, proxy);
             else
                 rc = socks5_connect(socks_sock, dest_ip, dest_port, proxy);
@@ -4686,7 +4689,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_MoveRuleToPosition(UINT32 rule_id, UINT32 new_p
     return TRUE;
 }
 
-PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
+PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password, BOOL send_domain_to_proxy)
 {
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return 0;
@@ -4703,6 +4706,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* pr
     cfg->config_id = g_next_config_id++;
     cfg->type      = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
     cfg->port      = proxy_port;
+    cfg->send_domain_to_proxy = send_domain_to_proxy;
     strncpy_s(cfg->host, sizeof(cfg->host), proxy_ip, _TRUNCATE);
     cfg->resolved_ip = resolve_hostname(proxy_ip);
     if (username != NULL) strncpy_s(cfg->username, sizeof(cfg->username), username, _TRUNCATE);
@@ -4716,7 +4720,7 @@ PROXYBRIDGE_API UINT32 ProxyBridge_AddProxyConfig(ProxyType type, const char* pr
     return cfg->config_id;
 }
 
-PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password)
+PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType type, const char* proxy_ip, UINT16 proxy_port, const char* username, const char* password, BOOL send_domain_to_proxy)
 {
     if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
         return FALSE;
@@ -4737,6 +4741,7 @@ PROXYBRIDGE_API BOOL ProxyBridge_EditProxyConfig(UINT32 config_id, ProxyType typ
 
             cfg->type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
             cfg->port = proxy_port;
+            cfg->send_domain_to_proxy = send_domain_to_proxy;
             strncpy_s(cfg->host, sizeof(cfg->host), proxy_ip, _TRUNCATE);
             cfg->resolved_ip = resolved;
             cfg->username[0] = '\0';

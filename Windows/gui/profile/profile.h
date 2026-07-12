@@ -26,6 +26,7 @@ typedef struct {
     wchar_t port[16];
     wchar_t user[128];
     wchar_t pass[128];
+    int     sendDomain;           // 1 = proxy resolves DNS (send hostname), 0 = send IP
 } PBConfig;
 
 typedef struct {

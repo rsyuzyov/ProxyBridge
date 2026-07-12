@@ -179,6 +179,7 @@ void PB_ProfileLoad(const wchar_t* name, PBProfile* p)
                 u2w(json_str(c, "Port", ""), cf->port, 16);
                 u2w(json_str(c, "Username", ""), cf->user, 128);
                 u2w(json_str(c, "Password", ""), cf->pass, 128);
+                cf->sendDomain = json_bool(c, "SendDomainToProxy", 1);   // default on
             }
 
         JVal* rules = json_get(root, "ProxyRules");
@@ -249,7 +250,8 @@ BOOL PB_ProfileSave(const wchar_t* name, const PBProfile* p)
         put_kv_str(&b, "      ", "Host", c->host, ",\n");
         put_kv_str(&b, "      ", "Port", c->port, ",\n");
         put_kv_str(&b, "      ", "Username", c->user, ",\n");
-        put_kv_str(&b, "      ", "Password", c->pass, "\n");
+        put_kv_str(&b, "      ", "Password", c->pass, ",\n");
+        sb_put(&b, "      \"SendDomainToProxy\": "); sb_put(&b, c->sendDomain ? "true" : "false"); sb_put(&b, "\n");
         sb_put(&b, "    }");
     }
     sb_put(&b, p->cfgCount ? "\n  ],\n" : "],\n");

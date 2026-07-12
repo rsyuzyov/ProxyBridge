@@ -229,7 +229,7 @@ static void ApplyConfigs(void)
         int type = (_wcsicmp(c->type, L"HTTP") == 0) ? PB_PROXY_HTTP : PB_PROXY_SOCKS5;
         char h[256], u[256], p[256];
         W2Ux(c->host, h, sizeof(h)); W2Ux(c->user, u, sizeof(u)); W2Ux(c->pass, p, sizeof(p));
-        c->nativeId = g_api.AddProxyConfig((PBProxyType)type, h, (unsigned short)_wtoi(c->port), u, p);
+        c->nativeId = g_api.AddProxyConfig((PBProxyType)type, h, (unsigned short)_wtoi(c->port), u, p, c->sendDomain ? TRUE : FALSE);
         if (c->storedId == 0) c->storedId = c->nativeId;
     }
 }
