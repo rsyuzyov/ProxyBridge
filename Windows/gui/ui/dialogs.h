@@ -21,7 +21,7 @@ static LRESULT CALLBACK ListDarkSubProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT
             {
             case CDDS_PREPAINT:
                 FillRect(cd->hdc, &cd->rc, g_brPanel);
-                return CDRF_NOTIFYITEMDRAW;
+                return CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
             case CDDS_ITEMPREPAINT:
             {
                 wchar_t txt[64] = {0};
@@ -35,6 +35,23 @@ static LRESULT CALLBACK ListDarkSubProc(HWND h, UINT m, WPARAM w, LPARAM l, UINT
                 RECT ln = { cd->rc.right - 1, cd->rc.top, cd->rc.right, cd->rc.bottom };
                 FillRect(cd->hdc, &ln, g_brBg);   // subtle column divider
                 return CDRF_SKIPDEFAULT;
+            }
+            case CDDS_POSTPAINT:
+            {
+                // Paint the empty area to the right of the last column dark; otherwise
+                // it shows the default white header background (visible at the edge and
+                // whenever the columns don't span the full width, e.g. after a drag).
+                HWND hdr = nh->hwndFrom;
+                int n = Header_GetItemCount(hdr);
+                RECT last = {0, 0, 0, 0};
+                if (n > 0) Header_GetItemRect(hdr, n - 1, &last);
+                RECT hr; GetClientRect(hdr, &hr);
+                if (hr.right > last.right)
+                {
+                    RECT fill = { last.right, hr.top, hr.right, hr.bottom };
+                    FillRect(cd->hdc, &fill, g_brPanel);
+                }
+                return CDRF_DODEFAULT;
             }
             }
         }
