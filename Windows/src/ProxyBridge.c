@@ -182,6 +182,10 @@ static volatile BOOL g_has_active_rules = FALSE;
 // Set when at least one enabled rule carries a domain filter. Gates the DNS-cache
 // lookup in match_rule so setups without domain rules pay zero extra cost.
 static volatile BOOL g_has_domain_rules = FALSE;
+// Set when at least one enabled rule blocks. Gates the loopback short-circuit in the
+// outbound TCP branch: with no BLOCK rule around, loopback traffic can only ever end
+// up DIRECT, so the rule lookup for it is pure overhead.
+static volatile BOOL g_has_block_rules = FALSE;
 static SOCKET udp_relay_socket = INVALID_SOCKET;
 static SOCKET udp_relay_socket6 = INVALID_SOCKET;
 static volatile BOOL running = FALSE;
@@ -689,6 +693,21 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                 UINT16 sp = ntohs(tcp_header->SrcPort);
                 UINT16 dp = ntohs(tcp_header->DstPort);
 
+                // Loopback short-circuit, same reasoning as the IPv4 branch below.
+                if (!g_localhost_via_proxy && !g_has_block_rules &&
+                    sp != (UINT16)g_local_relay_port && dp != (UINT16)g_local_relay_port)
+                {
+                    const UINT8 *lb_dst6 = (const UINT8*)ipv6_header->DstAddr;
+                    static const UINT8 lb_loopback6[16] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1};
+                    static const UINT8 lb_v4mapped_pfx[12] = {0,0,0,0, 0,0,0,0, 0,0,0xff,0xff};
+                    if (memcmp(lb_dst6, lb_loopback6, 16) == 0 ||
+                        (memcmp(lb_dst6, lb_v4mapped_pfx, 12) == 0 && lb_dst6[12] == 127))
+                    {
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
+                }
+
                 if (port_is_decided(sp))
                 {
                     if (tcp_header->Fin || tcp_header->Rst) port_clear(sp);
@@ -1066,6 +1085,27 @@ static DWORD WINAPI packet_processor(LPVOID arg)
 
         if (addr.Outbound)
         {
+            // Loopback short-circuit. With "Localhost via Proxy" off a 127.x destination
+            // is forced to DIRECT further down anyway, so unless some enabled rule could
+            // block it there is nothing left to decide - and deciding is not free: the
+            // rule lookup resolves the owning PID by walking the whole TCP table, and the
+            // verdict then occupies a slot in the port-decision bitmaps. Loopback IPC is
+            // high-rate and short-lived (dev tooling opens thousands of such connections
+            // per hour), which is exactly the traffic that should not be paying for it.
+            // Relay ports stay out: proxied connections are bounced through
+            // 127.0.0.1:<relay> and must keep flowing.
+            if (!g_localhost_via_proxy && !g_has_block_rules &&
+                (((ntohl(ip_header->DstAddr) >> 24) & 0xFF) == 127))
+            {
+                UINT16 lb_sp = ntohs(tcp_header->SrcPort);
+                UINT16 lb_dp = ntohs(tcp_header->DstPort);
+                if (lb_sp != (UINT16)g_local_relay_port && lb_dp != (UINT16)g_local_relay_port)
+                {
+                    WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                    continue;
+                }
+            }
+
             // per port decision fast-path.
             // Once check_process_rule() has run for a source port and decided DIRECT,
             // every subsequent packet from that port takes this branch one bitmap
@@ -5333,6 +5373,7 @@ static void update_has_active_rules(void)
 {
     BOOL has_active = FALSE;
     BOOL has_domain = FALSE;
+    BOOL has_block = FALSE;
 
     AcquireSRWLockShared(&g_rules_lock);
     PROCESS_RULE *rule = rules_list;
@@ -5342,16 +5383,18 @@ static void update_has_active_rules(void)
         {
             has_active = TRUE;
             if (rule_has_domain_filter(rule))
-            {
                 has_domain = TRUE;
-                break;  // both flags are now known
-            }
+            if (rule->action == RULE_ACTION_BLOCK)
+                has_block = TRUE;
+            if (has_domain && has_block)
+                break;  // all flags are now known
         }
         rule = rule->next;
     }
     ReleaseSRWLockShared(&g_rules_lock);
 
     g_has_active_rules = has_active;
+    g_has_block_rules = has_block;
 
     // Edge trigger: when domain rules first become active, flush the OS DNS cache so
     // subsequent connections re-resolve and populate our snoop cache.
