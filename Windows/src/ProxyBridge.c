@@ -12,6 +12,7 @@
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "advapi32.lib")  // token privileges (see enable_debug_privilege)
 
 #define MAXBUF 0xFFFF
 #define LOCAL_PROXY_PORT 34010
@@ -1571,6 +1572,47 @@ static RuleAction check_process_rule_v6(const UINT8 src_ip6[16], UINT16 src_port
     return action;
 }
 
+
+// Rules are matched by process name, and resolving it means opening the owning
+// process. A process created by another interactive user carries a default DACL
+// granting that user and SYSTEM only - Administrators are not on it - so even
+// running elevated, OpenProcess() fails for everything outside our own session
+// and check_process_rule() falls back to DIRECT. On a multi-user machine
+// (terminal server, or simply a second logged-on account) that silently sends
+// every other user's traffic straight out, bypassing all rules.
+//
+// SeDebugPrivilege is present but disabled in an elevated token; enabling it
+// makes the lookup work session-wide. Failure is non-fatal - it just leaves the
+// previous behaviour - so it is reported and start continues.
+static void enable_debug_privilege(void)
+{
+    HANDLE token = NULL;
+    TOKEN_PRIVILEGES tp;
+    LUID luid;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+    {
+        log_message("SeDebugPrivilege: OpenProcessToken failed (%lu) - rules will not apply to other users' processes", GetLastError());
+        return;
+    }
+
+    if (!LookupPrivilegeValueA(NULL, SE_DEBUG_NAME, &luid))
+    {
+        log_message("SeDebugPrivilege: lookup failed (%lu) - rules will not apply to other users' processes", GetLastError());
+        CloseHandle(token);
+        return;
+    }
+
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    // AdjustTokenPrivileges reports partial success through GetLastError, not its return value
+    if (!AdjustTokenPrivileges(token, FALSE, &tp, sizeof(tp), NULL, NULL) || GetLastError() != ERROR_SUCCESS)
+        log_message("SeDebugPrivilege not granted - rules will not apply to processes of other users");
+
+    CloseHandle(token);
+}
 
 static BOOL get_process_name_from_pid(DWORD pid, char *name, DWORD name_size)
 {
@@ -5370,6 +5412,10 @@ PROXYBRIDGE_API BOOL ProxyBridge_Start(void)
 
     InitializeSRWLock(&lock);
     dns_cache_init();
+
+    // Needed to resolve process names outside our own logon session; see the
+    // function for why an elevated token is not enough on its own.
+    enable_debug_privilege();
 
     // If domain rules were configured before start, flush the OS DNS cache so the very
     // first connections re-resolve on the wire and populate our IP->hostname snoop cache.
