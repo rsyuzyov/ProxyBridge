@@ -570,6 +570,21 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                         continue;
                     }
 
+                    // Loopback short-circuit, same reasoning as the TCP branch.
+                    if (!g_localhost_via_proxy && !g_has_block_rules &&
+                        dp != LOCAL_UDP_RELAY_PORT && sp != LOCAL_UDP_RELAY_PORT)
+                    {
+                        const UINT8 *lb_d6 = (const UINT8*)ipv6_header->DstAddr;
+                        static const UINT8 lb_lb6[16] = {0,0,0,0, 0,0,0,0, 0,0,0,0, 0,0,0,1};
+                        static const UINT8 lb_v4p[12] = {0,0,0,0, 0,0,0,0, 0,0,0xff,0xff};
+                        if (memcmp(lb_d6, lb_lb6, 16) == 0 ||
+                            (memcmp(lb_d6, lb_v4p, 12) == 0 && lb_d6[12] == 127))
+                        {
+                            WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                            continue;
+                        }
+                    }
+
                     if (!g_has_active_rules && g_connection_callback == NULL)
                     {
                         WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
@@ -948,6 +963,15 @@ static DWORD WINAPI packet_processor(LPVOID arg)
                     UINT32 src_ip = ip_header->SrcAddr;
                     UINT32 dest_ip = ip_header->DstAddr;
                     UINT16 dest_port = ntohs(udp_header->DstPort);
+
+                    // Loopback short-circuit, same reasoning as the TCP branch.
+                    if (!g_localhost_via_proxy && !g_has_block_rules &&
+                        ((dest_ip >> 0) & 0xFF) == 127 &&
+                        dest_port != LOCAL_UDP_RELAY_PORT && src_port != LOCAL_UDP_RELAY_PORT)
+                    {
+                        WinDivertSend(windivert_handle, packet, packet_len, NULL, &addr);
+                        continue;
+                    }
 
                     // if no rule configuree all connection direct with no checks avoid unwanted memory and pocessing whcich could delay
                     if (!g_has_active_rules && g_connection_callback == NULL)
